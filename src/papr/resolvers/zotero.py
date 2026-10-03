@@ -120,17 +120,17 @@ def _api_attachment(client: httpx.Client, base: str, item_key: str) -> str | Non
     return None
 
 
-def search_api(query: str, config: Config) -> list[Article]:
+def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
     base = config.zotero_api_url.rstrip("/")
     if not base:
         return []
     headers = {"Zotero-API-Version": "3"}
-    with httpx.Client(timeout=1.0, headers=headers) as c:
-        r = c.get(
+    with httpx.Client(timeout=1.0, headers=headers) as client:
+        r = client.get(
             f"{base}/users/0/items/top",
             params={
                 "q": query,
-                "qmode": "titleCreatorYear",
+                "qmode": qmode,
                 "format": "json",
                 "limit": max(20, config.max_candidates * 4),
             },
@@ -141,11 +141,18 @@ def search_api(query: str, config: Config) -> list[Article]:
         articles = []
         for item in r.json():
             key = item.get("key") or item.get("data", {}).get("key")
-            local_pdf = _api_attachment(c, base, key) if key else None
+            local_pdf = _api_attachment(client, base, key) if key else None
             article = from_api_item(item, local_pdf)
             if article:
-                article.score = score_article(query, article)
                 articles.append(article)
+    return articles
+
+
+def search_api(query: str, config: Config) -> list[Article]:
+    articles = _api_articles(query, config, "titleCreatorYear")
+    for article in articles:
+        article.score = score_article(query, article)
+    articles = [a for a in articles if (a.score or 0.0) >= 0.35]
     articles.sort(key=lambda a: a.score or 0.0, reverse=True)
     return articles[: config.max_candidates]
 
@@ -262,20 +269,45 @@ def _sqlite_attachment(conn: sqlite3.Connection, item_id: int, data_dir: Path) -
     return None
 
 
-def search_sqlite(query: str, config: Config) -> list[Article]:
+def _sqlite_all(config: Config) -> list[Article]:
     data_dir = find_data_dir(config)
     if not data_dir:
         return []
     conn = _snapshot(data_dir / "zotero.sqlite")
     try:
-        articles = [article for _, article in _sqlite_articles(conn, data_dir)]
+        return [article for _, article in _sqlite_articles(conn, data_dir)]
     finally:
         conn.close()
+
+
+def search_sqlite(query: str, config: Config) -> list[Article]:
+    articles = _sqlite_all(config)
     for article in articles:
         article.score = score_article(query, article)
     articles = [a for a in articles if (a.score or 0.0) >= 0.35]
     articles.sort(key=lambda a: a.score or 0.0, reverse=True)
     return articles[: config.max_candidates]
+
+
+def by_doi(doi: str, config: Config) -> Article | None:
+    target = normalize_doi(doi)
+    if not target:
+        return None
+    try:
+        for article in _api_articles(target, config, "everything"):
+            if article.doi == target:
+                article.score = 1.0
+                return article
+    except (httpx.HTTPError, OSError, ValueError):
+        pass
+    try:
+        for article in _sqlite_all(config):
+            if article.doi == target:
+                article.score = 1.0
+                return article
+    except (sqlite3.Error, OSError):
+        pass
+    return None
 
 
 def search(query: str, config: Config) -> list[Article]:

@@ -84,6 +84,7 @@ def test_zotero_sqlite_author_year_and_attachment(tmp_path: Path):
     assert result[0].doi == "10.1000/jenny"
     assert result[0].score is not None and result[0].score > 0.9
     assert result[0].local_pdf == str(pdf)
+    assert zotero.by_doi("10.1000/JENNY", cfg).local_pdf == str(pdf)
 
 
 def test_zolit_database_search(tmp_path: Path):
@@ -118,11 +119,13 @@ def test_zolit_database_search(tmp_path: Path):
     conn.commit()
     conn.close()
 
-    result = zolit.search("Jenny 2006", Config(zolit_db=db))
+    cfg = Config(zolit_db=db)
+    result = zolit.search("Jenny 2006", cfg)
 
     assert len(result) == 1
     assert result[0].source == "zolit"
     assert result[0].local_pdf == str(pdf)
+    assert zolit.by_doi("10.1000/JENNY", cfg).local_pdf == str(pdf)
 
 
 def test_zolit_sbs_seed_parser(tmp_path: Path):

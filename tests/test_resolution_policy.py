@@ -1,6 +1,6 @@
+from papr import resolvers
 from papr.config import Config
 from papr.model import Article, Person
-from papr import resolvers
 
 
 def _jenny(title: str, doi: str | None = "10.1000/jenny") -> Article:
@@ -64,3 +64,16 @@ def test_sbs_seed_without_identifier_expands_remote_query(monkeypatch):
 
     assert "Specific known title" in seen["query"]
     assert result[0].doi == "10.1000/found"
+
+
+def test_doi_uses_local_metadata_and_pdf(monkeypatch):
+    local = _jenny("Known locally")
+    local.local_pdf = "/tmp/paper.pdf"
+    monkeypatch.setattr(resolvers, "_local_by_doi", lambda doi, config: [local])
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda doi, config: None)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda doi, config: None)
+
+    result = resolvers.resolve("10.1000/jenny", Config())
+
+    assert result[0].local_pdf == "/tmp/paper.pdf"
+    assert result[0].source == "zotero"

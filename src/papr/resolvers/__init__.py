@@ -6,6 +6,7 @@ from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
 from .common import deduplicate, extract_doi, extract_pmid
 
 LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search)
+LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi)
 
 
 def _local_search(query: str, config: Config) -> list[Article]:
@@ -18,6 +19,18 @@ def _local_search(query: str, config: Config) -> list[Article]:
     result = deduplicate(articles)
     result.sort(key=lambda a: a.score or 0.0, reverse=True)
     return result[: config.max_candidates]
+
+
+def _local_by_doi(doi: str, config: Config) -> list[Article]:
+    articles = []
+    for lookup in LOCAL_DOI_LOOKUPS:
+        try:
+            article = lookup(doi, config)
+            if article:
+                articles.append(article)
+        except Exception:
+            continue
+    return deduplicate(articles)
 
 
 def _strong_local(candidates: list[Article], config: Config) -> bool:
@@ -59,17 +72,18 @@ def resolve(
 ) -> list[Article]:
     doi = extract_doi(query)
     if doi:
+        local = _local_by_doi(doi, config) if use_local and config.local_sources else []
         if not use_remote:
-            return []
-        articles = []
+            return local
+        remote = []
         for fn in (crossref.by_doi, openalex.by_doi):
             try:
                 item = fn(doi, config)
                 if item:
-                    articles.append(item)
+                    remote.append(item)
             except Exception:
                 continue
-        return deduplicate(articles)
+        return deduplicate([*local, *remote])
 
     pmid = extract_pmid(query)
     if pmid:

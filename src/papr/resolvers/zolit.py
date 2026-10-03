@@ -22,6 +22,16 @@ def _config_paths(config: Config) -> list[Path]:
     if config.zolit_sbs_repo:
         sibling = config.zolit_sbs_repo.parent / "zolit"
         paths.extend([sibling / "config.local.toml", sibling / "config.toml"])
+
+    installed_domain = Path.home() / ".zolit" / "domains" / "sbs"
+    if installed_domain.exists():
+        try:
+            sbs_repo = installed_domain.resolve().parent.parent
+            sibling = sbs_repo.parent / "zolit"
+            paths.extend([sibling / "config.local.toml", sibling / "config.toml"])
+        except OSError:
+            pass
+
     paths.extend(
         [
             Path.home() / ".zolit" / "config.toml",
@@ -102,6 +112,28 @@ def _local_pdf(conn: sqlite3.Connection, item_key: str) -> str | None:
     return None
 
 
+def _article_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Article:
+    fields = _fields(row["zotero_json"])
+    try:
+        year = int(row["year"]) if row["year"] else None
+    except (TypeError, ValueError):
+        year = None
+    return Article(
+        title=row["title"],
+        authors=_people(row["creators_json"]),
+        year=year,
+        journal=fields.get("publicationTitle") or fields.get("bookTitle") or None,
+        volume=fields.get("volume") or None,
+        issue=fields.get("issue") or None,
+        pages=fields.get("pages") or None,
+        doi=normalize_doi(row["doi"]),
+        url=fields.get("url") or None,
+        abstract=fields.get("abstractNote") or None,
+        local_pdf=_local_pdf(conn, row["item_key"]),
+        source="zolit",
+    )
+
+
 def search(query: str, config: Config) -> list[Article]:
     db = find_db(config)
     if not db:
@@ -118,25 +150,7 @@ def search(query: str, config: Config) -> list[Article]:
         ).fetchall()
         articles = []
         for row in rows:
-            fields = _fields(row["zotero_json"])
-            try:
-                year = int(row["year"]) if row["year"] else None
-            except (TypeError, ValueError):
-                year = None
-            article = Article(
-                title=row["title"],
-                authors=_people(row["creators_json"]),
-                year=year,
-                journal=fields.get("publicationTitle") or fields.get("bookTitle") or None,
-                volume=fields.get("volume") or None,
-                issue=fields.get("issue") or None,
-                pages=fields.get("pages") or None,
-                doi=normalize_doi(row["doi"]),
-                url=fields.get("url") or None,
-                abstract=fields.get("abstractNote") or None,
-                local_pdf=_local_pdf(conn, row["item_key"]),
-                source="zolit",
-            )
+            article = _article_from_row(conn, row)
             article.score = score_article(query, article)
             if (article.score or 0.0) >= 0.35:
                 articles.append(article)
@@ -144,3 +158,28 @@ def search(query: str, config: Config) -> list[Article]:
         conn.close()
     articles.sort(key=lambda a: a.score or 0.0, reverse=True)
     return articles[: config.max_candidates]
+
+
+def by_doi(doi: str, config: Config) -> Article | None:
+    target = normalize_doi(doi)
+    db = find_db(config)
+    if not target or not db:
+        return None
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            select item_key, title, year, creators_json, doi, zotero_json
+            from items where lower(doi) = ?
+            limit 1
+            """,
+            (target,),
+        ).fetchone()
+        if not row:
+            return None
+        article = _article_from_row(conn, row)
+        article.score = 1.0
+        return article
+    finally:
+        conn.close()
