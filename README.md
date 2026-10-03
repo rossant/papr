@@ -347,6 +347,20 @@ PAPR_ZOLIT_SBS_REPO
 papr refs.txt -f pdf,md --non-interactive --report report.json
 ```
 
+In an interactive terminal, batch mode shows live progress on stderr with the
+current resolve, fetch, process, or export step and its elapsed time. The bar tracks
+completed papers; after two papers complete, it estimates remaining time. Remote
+OCR shows a spinner; native extraction reports page counts. When stderr is not
+a terminal, papr prints plaintext stage messages instead. Downloads show
+received bytes and a progress bar when the response supplies a usable size.
+
+Use `--quiet` to suppress progress and the final batch summary while keeping
+results and errors. `--verbose` adds resolver and download diagnostics.
+
+Each item in the JSON file written by `--report` includes `duration` in seconds,
+per-stage `timings` in seconds, and `failed_stage` on errors. The terminal summary
+shows successes, failures, cache hits, elapsed time, and the output directory.
+
 The process exits non-zero if at least one item fails.
 Unreadable or malformed input files and corrupt PDFs are recorded in the report;
 other inputs continue processing. Local SQLite libraries are read once per
@@ -376,5 +390,14 @@ uv run pytest
 uv run ruff check .
 uv build
 ```
+
+If `papr` is installed as an editable uv tool, source edits are picked up
+immediately, but dependency changes require reinstalling the tool environment:
+
+```bash
+uv tool install --force --editable '.[ucl]'
+```
+
+Omit `[ucl]` if you do not use institutional browser access.
 
 CI tests Python 3.11 and 3.13 on Linux and macOS.
