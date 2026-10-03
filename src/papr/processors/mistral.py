@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from ..config import Config
+from ..progress import emit
 
 BASE = "https://api.mistral.ai/v1"
 
@@ -76,6 +77,7 @@ def to_markdown(pdf: Path, config: Config) -> str:
     signed_url: str | None = None
     with httpx.Client(headers=headers, timeout=httpx.Timeout(180.0, connect=30.0)) as c:
         try:
+            emit("process", "Uploading PDF to Mistral")
             with pdf.open("rb") as f:
                 r = c.post(
                     f"{BASE}/files",
@@ -85,11 +87,13 @@ def to_markdown(pdf: Path, config: Config) -> str:
             r.raise_for_status()
             file_id = r.json()["id"]
 
+            emit("process", "Preparing Mistral OCR request")
             r = c.get(f"{BASE}/files/{file_id}/url", params={"expiry": 1})
             r.raise_for_status()
             signed_url = r.json()["url"]
 
             for attempt in range(3):
+                emit("process", "Mistral OCR · waiting for response")
                 r = c.post(
                     f"{BASE}/ocr",
                     json={
@@ -102,11 +106,13 @@ def to_markdown(pdf: Path, config: Config) -> str:
                 delay = _retry_delay(r, attempt)
                 if delay > 30:
                     break
+                emit("process", f"Mistral HTTP {r.status_code}; retrying in {delay:g}s")
                 time.sleep(delay)
             r.raise_for_status()
             pages = r.json().get("pages", [])
             if not pages:
                 raise MistralOcrError("Mistral OCR returned no pages")
+            emit("process", f"Received OCR for {len(pages)} pages")
             return "\n\n".join(page.get("markdown", "") for page in pages).strip() + "\n"
         except httpx.HTTPStatusError as exc:
             raise MistralOcrError(_status_error(exc.response, api_key, signed_url)) from exc
@@ -118,6 +124,7 @@ def to_markdown(pdf: Path, config: Config) -> str:
         finally:
             if file_id:
                 try:
+                    emit("process", "Removing temporary Mistral upload")
                     c.delete(f"{BASE}/files/{file_id}")
                 except Exception:
                     pass

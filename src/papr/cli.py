@@ -8,6 +8,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from time import perf_counter
 
 from . import __version__
 from .config import DEFAULT_TEMPLATE, Config
@@ -16,6 +17,7 @@ from .fetchers import fetch_pdf, ucl
 from .filename import basename
 from .input import load_input, materialize_article
 from .model import Article
+from .progress import ProgressLogHandler, Reporter, emit, pause
 from .resolvers import resolve
 from .resolvers.common import extract_doi, extract_pmid
 from .resolvers.session import resolution_session
@@ -31,7 +33,7 @@ def _diagnostics(verbose: bool):
         return
     previous_level = logger.level
     previous_propagate = logger.propagate
-    handler = logging.StreamHandler(sys.stderr)
+    handler = ProgressLogHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
@@ -70,6 +72,11 @@ def _choose(query: str, candidates: list[Article], config: Config, interactive: 
     except LookupError:
         if not interactive or not candidates or extract_doi(query) or extract_pmid(query):
             raise
+    with pause():
+        return _prompt_candidate(query, candidates)
+
+
+def _prompt_candidate(query: str, candidates: list[Article]) -> Article:
     print(f"Ambiguous reference: {query}", file=sys.stderr)
     for i, item in enumerate(candidates, 1):
         score = f" [{item.score:.2f}]" if item.score is not None else ""
@@ -100,6 +107,7 @@ def _resolve_item(
 
 
 def _add_source_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--quiet", action="store_true", help="suppress progress and summary")
     parser.add_argument("--verbose", action="store_true", help="show diagnostic details")
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -217,6 +225,11 @@ def _config_init(config: Config) -> int:
 
 
 def _run_get(args: argparse.Namespace, config: Config) -> int:
+    with Reporter(enabled=not args.quiet) as reporter:
+        return _run_get_reported(args, config, reporter)
+
+
+def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Reporter) -> int:
     formats = args.formats or config.formats
     output_dir = (args.output or config.download_dir).expanduser()
     interactive = not args.non_interactive and sys.stdin.isatty()
@@ -226,18 +239,34 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
     failures = 0
     items: list[str | Article | Path] = []
     for value in args.inputs:
+        started = perf_counter()
         try:
+            emit("input", f"Loading {value}")
             items.extend(load_input(value, config))
         except Exception as exc:
             failures += 1
             logging.getLogger(__name__).debug("Input loading failed: %s", value, exc_info=True)
-            print(f"✗ {value}: {exc}", file=sys.stderr)
-            report.append({"input": value, "status": "error", "error": str(exc)})
+            with pause():
+                print(f"✗ {value}: {exc}", file=sys.stderr)
+            duration = perf_counter() - started
+            report.append(
+                {
+                    "input": value,
+                    "status": "error",
+                    "error": str(exc),
+                    "failed_stage": "input",
+                    "duration": duration,
+                    "timings": {"input": duration},
+                }
+            )
 
+    reporter.start_batch(len(items))
     for item in items:
         label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
         row: dict = {"input": label}
+        reporter.start_item(label)
         try:
+            emit("resolve", "Resolving reference")
             article, local_pdf = _resolve_item(
                 item,
                 config,
@@ -247,10 +276,12 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
             )
             row["doi"] = article.doi
             row["title"] = article.title
+            reporter.label = _article_line(article)
             row["resolver"] = article.source
             local_formats = list(formats)
             local_output = output_dir
             if args.rename:
+                emit("export", "Planning rename" if args.dry_run else "Renaming local PDF")
                 if local_pdf is None:
                     raise ValueError("--rename is only valid for a local PDF input")
                 base = basename(article, config, args.filename)
@@ -265,33 +296,36 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                             local_pdf.replace(destination)
                         else:
                             local_pdf.rename(destination)
-                print(f"✓ {destination}")
+                with pause():
+                    print(f"✓ {destination}")
                 row.update(
                     status="dry-run" if args.dry_run else "ok",
                     source="local",
                     outputs=[str(destination)],
                 )
-                report.append(row)
                 continue
             base = basename(article, config, args.filename)
             if args.dry_run:
+                emit("export", "Planning outputs")
                 planned = [
                     str(local_output / f"{base}{output_suffix(f, local_formats)}")
                     for f in local_formats
                 ]
-                print(f"✓ {_article_line(article)}")
-                for path in planned:
-                    print(f"  {path}")
+                with pause():
+                    print(f"✓ {_article_line(article)}")
+                    for path in planned:
+                        print(f"  {path}")
                 row.update(status="dry-run", outputs=planned)
-                report.append(row)
                 continue
 
             needs_pdf = bool({"pdf", "md", "txt"} & set(local_formats))
             with tempfile.TemporaryDirectory(prefix="papr-") as td:
                 if local_pdf is not None:
+                    emit("fetch", "Using local PDF")
                     pdf = local_pdf
                     source = "local"
                 elif needs_pdf:
+                    emit("fetch", "Fetching PDF")
                     pdf = Path(td) / "paper.pdf"
                     source = fetch_pdf(
                         article,
@@ -304,6 +338,10 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                 else:
                     pdf = Path(td) / "unused.pdf"
                     source = "metadata"
+                emit(
+                    "process" if {"md", "txt"} & set(local_formats) else "export",
+                    "Preparing outputs",
+                )
                 outputs, processor_used = export_outputs(
                     article,
                     pdf,
@@ -315,7 +353,8 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                     overwrite=args.overwrite,
                 )
             joined = ", ".join(str(x) for x in outputs)
-            print(f"✓ {article.first_creator} {article.year or ''} — {joined}")
+            with pause():
+                print(f"✓ {article.first_creator} {article.year or ''} — {joined}")
             row.update(
                 status="ok",
                 source=source,
@@ -325,10 +364,14 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
         except Exception as exc:
             failures += 1
             logging.getLogger(__name__).debug("Processing failed: %s", label, exc_info=True)
-            print(f"✗ {label}: {exc}", file=sys.stderr)
+            with pause():
+                print(f"✗ {label}: {exc}", file=sys.stderr)
             row.update(status="error", error=str(exc))
-        report.append(row)
+        finally:
+            row.update(reporter.finish_item(row.get("status", "error")))
+            report.append(row)
 
+    reporter.summary(failures, output_dir)
     if args.report:
         report_path = args.report.expanduser()
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,13 +413,28 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "resolve":
         args = _resolve_parser().parse_args(argv[1:])
         query = " ".join(args.query)
-        with _diagnostics(args.verbose), resolution_session():
-            candidates = resolve(
-                query,
-                config,
-                use_local=not args.no_local,
-                use_remote=not args.local_only,
-            )
+        with _diagnostics(args.verbose), resolution_session(), Reporter(
+            enabled=not args.quiet
+        ) as reporter:
+            reporter.start_batch(1)
+            reporter.start_item(query)
+            status = "error"
+            try:
+                emit("resolve", "Resolving reference")
+                candidates = resolve(
+                    query,
+                    config,
+                    use_local=not args.no_local,
+                    use_remote=not args.local_only,
+                )
+                status = "ok" if candidates else "error"
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Resolution failed: %s", query, exc_info=True)
+                with pause():
+                    print(f"✗ {query}: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                reporter.finish_item(status)
         if args.json:
             print(json.dumps([a.to_dict() for a in candidates], indent=2, ensure_ascii=False))
         else:

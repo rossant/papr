@@ -4,6 +4,7 @@ import logging
 
 from ..config import Config
 from ..model import Article
+from ..progress import emit
 from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
 from .common import deduplicate, extract_doi, extract_pmid
 
@@ -16,6 +17,7 @@ LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi)
 def _local_search(query: str, config: Config) -> list[Article]:
     articles: list[Article] = []
     for searcher in LOCAL_SEARCHERS:
+        emit("resolve", f"Searching {searcher.__module__.rsplit('.', 1)[-1]}")
         try:
             articles.extend(searcher(query, config))
         except Exception:
@@ -29,6 +31,7 @@ def _local_search(query: str, config: Config) -> list[Article]:
 def _local_by_doi(doi: str, config: Config) -> list[Article]:
     articles = []
     for lookup in LOCAL_DOI_LOOKUPS:
+        emit("resolve", f"Looking up DOI in {lookup.__module__.rsplit('.', 1)[-1]}")
         try:
             article = lookup(doi, config)
             if article:
@@ -54,6 +57,7 @@ def _strong_local(candidates: list[Article], config: Config) -> bool:
 def _remote_search(query: str, config: Config) -> list[Article]:
     articles: list[Article] = []
     for searcher in (crossref.search, openalex.search):
+        emit("resolve", f"Searching {searcher.__module__.rsplit('.', 1)[-1]}")
         try:
             articles.extend(searcher(query, config))
         except Exception:
@@ -84,6 +88,7 @@ def resolve(
             return local
         remote = []
         for fn in (crossref.by_doi, openalex.by_doi):
+            emit("resolve", f"Looking up DOI in {fn.__module__.rsplit('.', 1)[-1]}")
             try:
                 item = fn(doi, config)
                 if item:
@@ -97,9 +102,11 @@ def resolve(
     if pmid:
         if not use_remote:
             return []
+        emit("resolve", "Looking up PMID in PubMed")
         try:
             article = pubmed.by_pmid(pmid, config)
             if article and article.doi:
+                emit("resolve", "Enriching PubMed metadata with OpenAlex")
                 try:
                     oa = openalex.by_doi(article.doi, config)
                     if oa:

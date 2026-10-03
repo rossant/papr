@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..model import Article
+from ..progress import emit
 from . import oa, ucl
 
 
@@ -39,6 +40,7 @@ def fetch_pdf(
     refresh: bool = False,
     show_browser: bool = False,
 ) -> str:
+    emit("fetch", "Checking local PDF and cache")
     cache = _cache_path(article, config)
     local = None
     if article.local_pdf:
@@ -46,6 +48,7 @@ def fetch_pdf(
         if _is_local_pdf(candidate):
             local = candidate
     if local is None and not refresh and _is_local_pdf(cache):
+        emit("fetch", "Using cached PDF")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if cache.resolve() != destination.resolve():
             shutil.copy2(cache, destination)
@@ -56,6 +59,7 @@ def fetch_pdf(
         temp = Path(file.name)
     try:
         if local is not None:
+            emit("fetch", "Copying local PDF")
             shutil.copy2(local, temp)
             source = f"local:{local}"
         else:
@@ -63,6 +67,7 @@ def fetch_pdf(
             if source and not _is_local_pdf(temp):
                 source = None
             if not source and allow_ucl:
+                emit("fetch", "Open-access PDF unavailable; trying UCL access")
                 temp.unlink(missing_ok=True)
                 source = (
                     ucl.fetch(article, temp, config, headless=False)
@@ -71,6 +76,7 @@ def fetch_pdf(
                 )
             if not source or not _is_local_pdf(temp):
                 raise PdfUnavailable(f"No valid PDF found for {article.doi or article.title}")
+        emit("fetch", "Saving PDF to cache")
         temp.replace(cache)
     finally:
         temp.unlink(missing_ok=True)

@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from ..config import Config
 from ..model import Article
+from ..progress import emit
 from .oa import is_pdf
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
@@ -151,11 +152,13 @@ def _collect_candidate_urls(page) -> dict:
             if not navigation_race or attempt == 2:
                 raise
             logger.debug("UCL page navigated during PDF link collection; retrying", exc_info=True)
+            emit("fetch", "UCL page navigating; retrying PDF link discovery")
             page.wait_for_timeout(250 * (attempt + 1))
     return {"citation": None, "links": []}
 
 
 def _candidate_urls(page) -> list[str]:
+    emit("fetch", "Discovering publisher PDF links through UCL")
     for attempt in range(11):
         result = _collect_candidate_urls(page)
         urls = _rank_candidate_urls(page.url, result["links"], result["citation"])
@@ -173,6 +176,7 @@ def _browser_pdf(page, url: str, destination: Path, *, referer: str | None = Non
     def capture_download(download):
         downloads.append(download)
 
+    emit("fetch", "Downloading PDF through UCL browser")
     page.on("download", capture_download)
     navigation_error = None
     try:
@@ -224,10 +228,12 @@ def fetch(
 ) -> str | None:
     profile = config.ucl_profile_dir
     if not profile.exists():
+        emit("fetch", "UCL access unavailable: no saved browser profile")
         return None
     sync_playwright = _playwright()
     from playwright.sync_api import Error as PlaywrightError
 
+    emit("fetch", "Starting UCL browser session")
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(profile), headless=headless, accept_downloads=True, **_launch_kwargs()
@@ -235,6 +241,7 @@ def fetch(
         page = context.pages[0] if context.pages else context.new_page()
         try:
             try:
+                emit("fetch", "Opening publisher page through UCL")
                 response = page.goto(
                     _proxy_url(article), wait_until="domcontentloaded", timeout=90_000
                 )
@@ -259,6 +266,7 @@ def fetch(
                 "Referer": page.url,
             }
             for url in urls:
+                emit("fetch", "Requesting publisher PDF through UCL")
                 try:
                     r = context.request.get(url, timeout=60_000, headers=browser_headers)
                     body = r.body()

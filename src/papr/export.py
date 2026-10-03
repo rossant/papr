@@ -12,6 +12,7 @@ from .formats import bib, csl
 from .model import Article
 from .processors import markdown, select_backend
 from .processors.native import extract_text
+from .progress import emit
 
 FORMAT_SUFFIX = {
     "pdf": ".pdf",
@@ -32,6 +33,7 @@ def output_suffix(format_name: str, formats: list[str]) -> str:
 
 def _write(path: Path, text: str, overwrite: bool) -> Path:
     path = collision_safe_path(path, overwrite=overwrite)
+    emit("export", f"Writing {path.name}")
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -54,6 +56,7 @@ def export_outputs(
 
     if "pdf" in formats:
         dest = collision_safe_path(output_dir / f"{base}.pdf", overwrite=overwrite)
+        emit("export", f"Saving {dest.name}")
         if pdf.resolve() != dest.resolve():
             shutil.copy2(pdf, dest)
         outputs.append(dest)
@@ -81,6 +84,7 @@ def export_outputs(
 
 
 def _cached_markdown(pdf: Path, config: Config, processor: str | None) -> tuple[str, str]:
+    emit("process", "Checking Markdown cache")
     backend = select_backend(config, processor)
     with pdf.open("rb") as file:
         key = hashlib.file_digest(file, "sha256").hexdigest()
@@ -88,6 +92,7 @@ def _cached_markdown(pdf: Path, config: Config, processor: str | None) -> tuple[
     suffix = f"{backend}.{model_key}" if backend == "mistral" else backend
     cache = config.cache_dir / "processors" / f"{key}.{suffix}.md"
     if cache.exists():
+        emit("process", f"Using cached Markdown ({backend})")
         return cache.read_text(encoding="utf-8"), backend
     text, used = markdown(pdf, config, backend)
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +103,7 @@ def _cached_markdown(pdf: Path, config: Config, processor: str | None) -> tuple[
         ) as file:
             temp = Path(file.name)
             file.write(text)
+        emit("process", "Saving Markdown to cache")
         temp.replace(cache)
     finally:
         if temp is not None:
