@@ -130,6 +130,9 @@ def _get_parser() -> argparse.ArgumentParser:
     p.add_argument("--filename", help="override filename template")
     p.add_argument("--processor", choices=["auto", "mistral", "native"], help="Markdown processor")
     p.add_argument("--oa-only", action="store_true", help="never use institutional browser access")
+    p.add_argument(
+        "--show-browser", action="store_true", help="show Chrome during institutional PDF retrieval"
+    )
     p.add_argument("--refresh", action="store_true", help="ignore cached PDF")
     p.add_argument("--overwrite", action="store_true", help="replace existing outputs")
     p.add_argument(
@@ -296,6 +299,7 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                         config,
                         allow_ucl=not args.oa_only,
                         refresh=args.refresh,
+                        show_browser=args.show_browser,
                     )
                 else:
                     pdf = Path(td) / "unused.pdf"

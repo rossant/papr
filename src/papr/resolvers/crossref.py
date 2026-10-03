@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from ..config import Config
 from ..http import client
@@ -9,6 +9,20 @@ from ..model import Article, Person
 from .common import normalize_doi, score_article
 
 BASE = "https://api.crossref.org/works"
+
+
+def _publisher_url(item: dict[str, Any]) -> str | None:
+    primary = (item.get("resource") or {}).get("primary") or {}
+    url = primary.get("URL") or item.get("URL")
+    if url:
+        parsed = urlparse(url)
+        if parsed.hostname == "linkinghub.elsevier.com" and parsed.path.startswith(
+            "/retrieve/pii/"
+        ):
+            pii = parsed.path.removeprefix("/retrieve/pii/")
+            if pii.startswith("S") and pii[1:].isdigit():
+                return f"https://www.sciencedirect.com/science/article/pii/{pii}"
+    return url
 
 
 def _year(item: dict[str, Any]) -> int | None:
@@ -45,7 +59,7 @@ def from_item(item: dict[str, Any]) -> Article:
         issue=item.get("issue"),
         pages=item.get("page") or item.get("article-number"),
         doi=normalize_doi(item.get("DOI")),
-        url=item.get("URL"),
+        url=_publisher_url(item),
         abstract=item.get("abstract"),
         item_type=item.get("type") or "article-journal",
         oa_pdf_url=pdf,

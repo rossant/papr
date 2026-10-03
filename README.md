@@ -213,6 +213,12 @@ Remove the saved browser profile with:
 papr logout ucl
 ```
 
+Some publisher pages require visible Chrome to render their PDF controls:
+
+```bash
+papr DOI --show-browser
+```
+
 ## OCR and Markdown
 
 ```bash

@@ -37,6 +37,7 @@ def fetch_pdf(
     *,
     allow_ucl: bool = True,
     refresh: bool = False,
+    show_browser: bool = False,
 ) -> str:
     cache = _cache_path(article, config)
     local = None
@@ -63,7 +64,11 @@ def fetch_pdf(
                 source = None
             if not source and allow_ucl:
                 temp.unlink(missing_ok=True)
-                source = ucl.fetch(article, temp, config)
+                source = (
+                    ucl.fetch(article, temp, config, headless=False)
+                    if show_browser
+                    else ucl.fetch(article, temp, config)
+                )
             if not source or not _is_local_pdf(temp):
                 raise PdfUnavailable(f"No valid PDF found for {article.doi or article.title}")
         temp.replace(cache)

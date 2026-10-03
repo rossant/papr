@@ -68,3 +68,27 @@ def test_deduplicate_merges_sources():
     result = deduplicate([a, b])
     assert len(result) == 1
     assert result[0].pmid == "123"
+
+
+def test_crossref_uses_publisher_resource_instead_of_doi_redirect():
+    article = crossref_item(
+        {
+            "title": ["Paper"],
+            "URL": "https://doi.org/10.1016/j.chipro.2026.100296",
+            "resource": {
+                "primary": {"URL": "https://linkinghub.elsevier.com/retrieve/pii/S2950193826000203"}
+            },
+        }
+    )
+    assert article.url == "https://www.sciencedirect.com/science/article/pii/S2950193826000203"
+
+
+def test_crossref_preserves_other_publisher_resource():
+    article = crossref_item(
+        {
+            "title": ["Paper"],
+            "URL": "https://doi.org/10.1000/test",
+            "resource": {"primary": {"URL": "https://publisher.test/article"}},
+        }
+    )
+    assert article.url == "https://publisher.test/article"

@@ -121,3 +121,17 @@ def test_failed_refresh_preserves_old_cache(tmp_path, monkeypatch, config):
         fetch_pdf(article, tmp_path / "output.pdf", config, refresh=True, allow_ucl=False)
     assert cache.read_bytes() == b"%PDF-1.7\nold"
     assert list(cache.parent.glob("*.tmp.pdf")) == []
+
+
+def test_show_browser_requests_visible_institutional_browser(tmp_path, monkeypatch, config):
+    monkeypatch.setattr(oa, "fetch", lambda *args: None)
+    seen = []
+
+    def institutional_fetch(article, destination, config, *, headless=True):
+        seen.append(headless)
+        destination.write_bytes(b"%PDF-1.7\narticle")
+        return "ucl"
+
+    monkeypatch.setattr(ucl, "fetch", institutional_fetch)
+    assert fetch_pdf(Article("Paper"), tmp_path / "output.pdf", config, show_browser=True) == "ucl"
+    assert seen == [False]
