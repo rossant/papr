@@ -8,10 +8,9 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
-from .config import Config, DEFAULT_TEMPLATE
+from .config import DEFAULT_TEMPLATE, Config
 from .export import FORMAT_SUFFIX, export_outputs
-from .fetchers import PdfUnavailable, fetch_pdf
-from .fetchers import ucl
+from .fetchers import PdfUnavailable, fetch_pdf, ucl
 from .filename import basename
 from .input import load_input
 from .local import article_from_pdf

@@ -44,7 +44,7 @@ class Article:
         year = str(self.year or "n.d.")
         return f"{self.first_creator}{year}{word}".replace(" ", "")
 
-    def merge(self, other: "Article") -> "Article":
+    def merge(self, other: Article) -> Article:
         """Fill missing fields from another representation of the same work."""
         for name in (
             "year", "journal", "volume", "issue", "pages", "doi", "pmid", "pmcid",

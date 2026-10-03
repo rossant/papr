@@ -45,7 +45,7 @@ class Config:
         return self.data_dir / "browser" / "ucl"
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Config":
+    def load(cls, path: Path | None = None) -> Config:
         cfg = cls()
         secrets = Path(user_config_dir("papr")) / "secrets.env"
         if secrets.exists():
