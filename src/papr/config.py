@@ -7,7 +7,6 @@ from pathlib import Path
 
 from platformdirs import user_cache_dir, user_config_dir, user_data_dir
 
-
 DEFAULT_TEMPLATE = '{{ firstCreator suffix="_" }}{{ year suffix="_" }}{{ title truncate="100" }}'
 
 
