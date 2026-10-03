@@ -16,6 +16,7 @@ from .input import load_input
 from .local import article_from_pdf
 from .model import Article
 from .resolvers import resolve
+from .sources import statuses as source_statuses
 
 
 def _formats(value: str) -> list[str]:
@@ -31,7 +32,8 @@ def _article_line(article: Article) -> str:
     year = article.year or "n.d."
     journal = f" — {article.journal}" if article.journal else ""
     doi = f" — {article.doi}" if article.doi else ""
-    return f"{authors} ({year}). {article.title}{journal}{doi}"
+    source = f" [{article.source}]" if article.source else ""
+    return f"{authors} ({year}). {article.title}{journal}{doi}{source}"
 
 
 def _choose(query: str, candidates: list[Article], config: Config, interactive: bool) -> Article:
@@ -58,18 +60,48 @@ def _choose(query: str, candidates: list[Article], config: Config, interactive: 
 
 
 def _resolve_item(
-    item: str | Article | Path, config: Config, interactive: bool
+    item: str | Article | Path,
+    config: Config,
+    interactive: bool,
+    *,
+    use_local: bool = True,
+    use_remote: bool = True,
 ) -> tuple[Article, Path | None]:
     if isinstance(item, Article):
         if item.doi:
-            richer = resolve(item.doi, config)
+            richer = resolve(
+                item.doi,
+                config,
+                use_local=use_local,
+                use_remote=use_remote,
+            )
             if richer:
                 richer[0].merge(item)
                 return richer[0], None
         return item, None
     if isinstance(item, Path):
         return article_from_pdf(item, config), item
-    return _choose(item, resolve(item, config), config, interactive), None
+    candidates = resolve(
+        item,
+        config,
+        use_local=use_local,
+        use_remote=use_remote,
+    )
+    return _choose(item, candidates, config, interactive), None
+
+
+def _add_source_flags(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--local-only",
+        action="store_true",
+        help="resolve only against local Zotero/Zolit sources",
+    )
+    group.add_argument(
+        "--no-local",
+        action="store_true",
+        help="ignore Zotero/Zolit and use remote resolvers only",
+    )
 
 
 def _get_parser() -> argparse.ArgumentParser:
@@ -102,6 +134,7 @@ def _get_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="resolve and show planned outputs without fetching"
     )
     p.add_argument("--report", type=Path, help="write a JSON batch report")
+    _add_source_flags(p)
     return p
 
 
@@ -109,6 +142,7 @@ def _resolve_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="papr resolve", description="Resolve a scholarly reference.")
     p.add_argument("query", nargs="+")
     p.add_argument("--json", action="store_true")
+    _add_source_flags(p)
     return p
 
 
@@ -154,7 +188,14 @@ def _config_init(config: Config) -> int:
             '[matching]\n'
             'auto_accept_score = 0.78\n'
             'auto_accept_margin = 0.08\n'
-            'max_candidates = 5\n'
+            'max_candidates = 5\n\n'
+            '[local]\n'
+            'enabled = true\n'
+            'zotero_api_url = "http://127.0.0.1:23119/api"\n'
+            '# zotero_data_dir = "~/Zotero"\n'
+            '# zolit_repo = "~/src/zolit"\n'
+            '# zolit_db = "~/src/zolit/data.local/zolit.sqlite"\n'
+            '# zolit_sbs_repo = "~/src/zolit-sbs"\n'
         ),
         encoding="utf-8",
     )
@@ -166,6 +207,8 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
     formats = args.formats or config.formats
     output_dir = (args.output or config.download_dir).expanduser()
     interactive = not args.non_interactive and sys.stdin.isatty()
+    use_local = not args.no_local
+    use_remote = not args.local_only
     report: list[dict] = []
     failures = 0
     items: list[str | Article | Path] = []
@@ -176,9 +219,16 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
         label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
         row: dict = {"input": label}
         try:
-            article, local_pdf = _resolve_item(item, config, interactive)
+            article, local_pdf = _resolve_item(
+                item,
+                config,
+                interactive,
+                use_local=use_local,
+                use_remote=use_remote,
+            )
             row["doi"] = article.doi
             row["title"] = article.title
+            row["resolver"] = article.source
             local_formats = list(formats)
             local_output = output_dir
             if args.rename:
@@ -258,6 +308,13 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
     return 1 if failures else 0
 
 
+def _print_sources(config: Config) -> int:
+    for status in source_statuses(config):
+        mark = "✓" if status.available else "−"
+        print(f"{mark} {status.name:<12} {status.detail}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv in (["--version"], ["-V"]):
@@ -274,10 +331,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.institution == "ucl" and config.ucl_profile_dir.exists():
             shutil.rmtree(config.ucl_profile_dir)
         return 0
+    if argv and argv[0] == "sources":
+        return _print_sources(config)
     if argv and argv[0] == "resolve":
         args = _resolve_parser().parse_args(argv[1:])
         query = " ".join(args.query)
-        candidates = resolve(query, config)
+        candidates = resolve(
+            query,
+            config,
+            use_local=not args.no_local,
+            use_remote=not args.local_only,
+        )
         if args.json:
             print(json.dumps([a.to_dict() for a in candidates], indent=2, ensure_ascii=False))
         else:

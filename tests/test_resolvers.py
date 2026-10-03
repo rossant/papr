@@ -18,6 +18,17 @@ def test_scoring_prefers_matching_author_year_title():
     )
 
 
+def test_short_author_year_scores_as_strong_match():
+    article = Article("Any title", [Person(family="Jenny")], 2006)
+    assert score_article("Jenny 2006", article) > 0.9
+
+
+def test_two_same_author_year_items_remain_equally_plausible():
+    first = Article("Title one", [Person(family="Jenny")], 2006)
+    second = Article("Title two", [Person(family="Jenny")], 2006)
+    assert abs(score_article("Jenny 2006", first) - score_article("Jenny 2006", second)) < 0.02
+
+
 def test_crossref_mapping():
     a = crossref_item(
         {

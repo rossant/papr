@@ -19,6 +19,16 @@ def _cache_path(article: Article, config: Config) -> Path:
     return config.cache_dir / "pdf" / f"{digest}.pdf"
 
 
+def _is_local_pdf(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with path.open("rb") as file:
+            return file.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
 def fetch_pdf(
     article: Article,
     destination: Path,
@@ -35,7 +45,7 @@ def fetch_pdf(
 
     if article.local_pdf:
         local = Path(article.local_pdf).expanduser()
-        if local.exists() and local.read_bytes()[:5] == b"%PDF-":
+        if _is_local_pdf(local):
             cache.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(local, cache)
             destination.parent.mkdir(parents=True, exist_ok=True)
