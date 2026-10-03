@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-from urllib.parse import quote
 import shutil
 import sys
+from pathlib import Path
+from urllib.parse import quote
 
 from ..config import Config
 from ..model import Article

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-import tomllib
 
 from platformdirs import user_cache_dir, user_config_dir, user_data_dir
 
