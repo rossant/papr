@@ -87,3 +87,31 @@ def test_resolve_json_stdout_is_clean(monkeypatch, capsys, quiet):
     output = capsys.readouterr()
     assert json.loads(output.out)[0]["title"] == "A paper"
     assert ("Resolve:" in output.err) is not quiet
+
+
+@pytest.mark.parametrize("values", [["duhaime", "1987"], ["duhaime", "1987", "shaken", "baby"]])
+def test_unquoted_author_year_is_one_reference(values, tmp_path, monkeypatch):
+    seen = []
+
+    def resolve(item, *args, **kwargs):
+        seen.append(item)
+        return Article("A paper"), None
+
+    monkeypatch.setattr(cli, "_resolve_item", resolve)
+    args = cli._get_parser().parse_args([*values, "--dry-run", "--quiet", "-o", str(tmp_path)])
+    assert cli._run_get(args, Config()) == 0
+    assert seen == [" ".join(values)]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["Jenny 2006", "Duhaime 1987"],
+        ["10.1000/first", "10.1000/second"],
+        ["paper.pdf", "1987"],
+        ["one", "two"],
+        ["Jenny", "2006", "Duhaime", "1987"],
+    ],
+)
+def test_explicit_batch_inputs_stay_separate(values):
+    assert cli._input_values(values) == values

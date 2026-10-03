@@ -16,6 +16,7 @@ It works without a bibliography manager, but it can also use local **Zotero**,
 uv tool install git+https://github.com/rossant/papr.git
 
 papr "Jenny 2006"
+papr duhaime 1987
 papr "Jenny 2006 abusive head trauma" -f pdf,md
 papr 10.1542/peds.2006-1172 -f pdf,md,bib
 papr refs.txt -f pdf,md
@@ -24,6 +25,9 @@ papr article.pdf -f md,bib,csl
 ```
 
 By default, files are written to `~/Downloads`.
+An unquoted author/year query such as `papr duhaime 1987` is treated as one
+reference. Quote each citation when passing several references in one command;
+file inputs and DOI inputs remain separate.
 
 ## Local-first reference resolution
 
@@ -80,7 +84,10 @@ snapshot. Standard data directories are detected automatically:
 ```
 
 The SQLite fallback is read-only and uses SQLite's backup mechanism rather than
-modifying `zotero.sqlite`.
+modifying `zotero.sqlite`. If Zotero holds the database lock, papr stops trying
+after about one second and continues to other sources. Failed snapshots are
+remembered for the rest of that command so batch items do not repeat the wait.
+Enable the local API setting above to let papr search Zotero while it is open.
 
 ## Zolit integration
 

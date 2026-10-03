@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -10,6 +11,7 @@ import httpx
 
 from ..config import Config
 from ..model import Article, Person
+from ..progress import emit
 from .common import extract_year, normalize_doi, score_article
 from .session import cached_library
 
@@ -31,6 +33,9 @@ FIELD_NAMES = {
     "extra",
 }
 PMID_RE = re.compile(r"(?im)^PMID\s*:\s*(\d+)\s*$")
+API_BUDGET_SECONDS = 3.0
+SNAPSHOT_TIMEOUT_SECONDS = 1.0
+SQLITE_BUSY_TIMEOUT_SECONDS = 0.05
 
 
 def find_data_dir(config: Config) -> Path | None:
@@ -99,9 +104,20 @@ def _file_url_to_path(value: str) -> Path | None:
     return Path(unquote(parsed.path))
 
 
-def _api_attachment(client: httpx.Client, base: str, item_key: str) -> str | None:
-    r = client.get(
+def _api_get(client: httpx.Client, url: str, deadline: float, **kwargs) -> httpx.Response:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise httpx.TimeoutException("Zotero API lookup time budget exceeded")
+    return client.get(url, timeout=min(1.0, remaining), **kwargs)
+
+
+def _api_attachment(
+    client: httpx.Client, base: str, item_key: str, deadline: float
+) -> str | None:
+    r = _api_get(
+        client,
         f"{base}/users/0/items/{item_key}/children",
+        deadline,
         params={"itemType": "attachment", "format": "json"},
     )
     if r.status_code >= 400:
@@ -115,7 +131,7 @@ def _api_attachment(client: httpx.Client, base: str, item_key: str) -> str | Non
         key = child.get("key") or data.get("key")
         if not key:
             continue
-        file_r = client.get(f"{base}/users/0/items/{key}/file/view/url")
+        file_r = _api_get(client, f"{base}/users/0/items/{key}/file/view/url", deadline)
         if file_r.status_code >= 400:
             continue
         path = _file_url_to_path(file_r.text)
@@ -129,9 +145,13 @@ def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
     if not base:
         return []
     headers = {"Zotero-API-Version": "3"}
+    deadline = time.monotonic() + API_BUDGET_SECONDS
+    emit("resolve", "Querying Zotero desktop API")
     with httpx.Client(timeout=1.0, headers=headers) as client:
-        r = client.get(
+        r = _api_get(
+            client,
             f"{base}/users/0/items/top",
+            deadline,
             params={
                 "q": query,
                 "qmode": qmode,
@@ -140,16 +160,37 @@ def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
             },
         )
         if r.status_code in {403, 404}:
+            reason = "disabled in Zotero" if r.status_code == 403 else "unavailable"
+            emit("resolve", f"Zotero desktop API {reason}; trying local database")
             return []
         r.raise_for_status()
-        articles = []
+        candidates = []
         for item in r.json():
             key = item.get("key") or item.get("data", {}).get("key")
-            local_pdf = _api_attachment(client, base, key) if key else None
-            article = from_api_item(item, local_pdf)
+            article = from_api_item(item)
             if article:
-                articles.append(article)
-    return articles
+                article.score = score_article(query, article)
+                if qmode == "everything":
+                    if article.doi != normalize_doi(query):
+                        continue
+                    article.score = 1.0
+                elif article.score < 0.35:
+                    continue
+                candidates.append((key, article))
+        candidates.sort(key=lambda pair: pair[1].score or 0.0, reverse=True)
+        candidates = candidates[: config.max_candidates]
+        for index, (key, article) in enumerate(candidates, start=1):
+            if not key:
+                continue
+            emit("resolve", f"Checking Zotero PDF {index}/{len(candidates)}")
+            try:
+                article.local_pdf = _api_attachment(client, base, key, deadline)
+            except httpx.HTTPError:
+                # Keep useful metadata even when attachment requests are unavailable.
+                logger.debug("Zotero attachment lookup failed", exc_info=True)
+                if time.monotonic() >= deadline:
+                    break
+    return [article for _, article in candidates]
 
 
 def search_api(query: str, config: Config) -> list[Article]:
@@ -162,10 +203,30 @@ def search_api(query: str, config: Config) -> list[Article]:
 
 
 def _snapshot(source: Path) -> sqlite3.Connection:
-    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
-    dst = sqlite3.connect(":memory:")
+    deadline = time.monotonic() + SNAPSHOT_TIMEOUT_SECONDS
+    src = sqlite3.connect(
+        f"{source.resolve().as_uri()}?mode=ro", uri=True, timeout=SQLITE_BUSY_TIMEOUT_SECONDS
+    )
+    dst = None
+
+    reported_busy = False
+
+    def progress(status: int, remaining: int, total: int) -> None:
+        nonlocal reported_busy
+        if time.monotonic() >= deadline:
+            raise sqlite3.OperationalError("Zotero database snapshot timed out; database is busy")
+        if status in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and not reported_busy:
+            emit("resolve", "Zotero database is busy; retrying briefly")
+            reported_busy = True
+
     try:
-        src.backup(dst)
+        dst = sqlite3.connect(":memory:")
+        # backup() otherwise retries SQLITE_BUSY forever, ignoring connect(timeout=...).
+        src.backup(dst, pages=128, progress=progress, sleep=SQLITE_BUSY_TIMEOUT_SECONDS)
+    except BaseException:
+        if dst is not None:
+            dst.close()
+        raise
     finally:
         src.close()
     dst.row_factory = sqlite3.Row
@@ -297,8 +358,16 @@ def _sqlite_all(config: Config) -> list[Article]:
         return []
 
     def load() -> list[Article]:
-        conn = _snapshot(data_dir / "zotero.sqlite")
+        emit("resolve", "Reading Zotero database snapshot")
         try:
+            conn = _snapshot(data_dir / "zotero.sqlite")
+        except (sqlite3.Error, OSError):
+            emit("resolve", "Zotero database unavailable; continuing with other sources")
+            logger.debug("Zotero SQLite snapshot failed", exc_info=True)
+            # Cache this failure for the command too, rather than waiting again per paper.
+            return []
+        try:
+            emit("resolve", "Loading Zotero library metadata")
             return [article for _, article in _sqlite_articles(conn, data_dir)]
         finally:
             conn.close()
@@ -332,6 +401,7 @@ def by_doi(doi: str, config: Config) -> Article | None:
                 article.score = 1.0
                 return article
     except (sqlite3.Error, OSError):
+        emit("resolve", "Zotero database unavailable; continuing with other sources")
         logger.debug("Zotero SQLite lookup failed", exc_info=True)
     return None
 
@@ -346,5 +416,6 @@ def search(query: str, config: Config) -> list[Article]:
     try:
         return search_sqlite(query, config)
     except (sqlite3.Error, OSError):
+        emit("resolve", "Zotero database unavailable; continuing with other sources")
         logger.debug("Zotero SQLite search failed", exc_info=True)
         return []

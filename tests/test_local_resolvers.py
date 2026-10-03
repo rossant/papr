@@ -1,6 +1,10 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
+
+import httpx
+import pytest
 
 from papr.config import Config
 from papr.resolvers import zolit, zolit_sbs, zotero
@@ -171,3 +175,91 @@ def test_zotero_batch_reuses_snapshot_and_bulk_attachment_query(tmp_path, monkey
     with resolution_session():
         zotero.search_sqlite("Jenny 2006", config)
     assert len(snapshots) == 2
+
+
+def test_zotero_locked_snapshot_stops_retrying(tmp_path, monkeypatch):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    writer = sqlite3.connect(path)
+    writer.execute("begin exclusive")
+    monkeypatch.setattr(zotero, "SNAPSHOT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(zotero, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="snapshot timed out"):
+            zotero._snapshot(path)
+        assert time.monotonic() - started < 1.0
+    finally:
+        writer.rollback()
+        writer.close()
+    # A failed snapshot must release its connection and allow subsequent reads.
+    conn = zotero._snapshot(path)
+    assert conn.execute("select count(*) from items").fetchone()[0] == 2
+    conn.close()
+
+
+def test_zotero_api_only_loads_attachments_for_ranked_candidates(monkeypatch):
+    requested = []
+    items = [
+        {"key": str(index), "data": {"title": "Jenny paper", "date": "2006"}}
+        for index in range(20)
+    ]
+
+    def get(self, url, **kwargs):
+        requested.append(url)
+        if url.endswith("/top"):
+            return httpx.Response(200, json=items, request=httpx.Request("GET", url))
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    results = zotero.search_api("Jenny paper", Config(max_candidates=2))
+    assert len(results) == 2
+    assert len(requested) == 3
+    assert all("/children" in url for url in requested[1:])
+
+
+def test_zotero_batch_does_not_retry_unavailable_snapshot(tmp_path, monkeypatch):
+    (tmp_path / "zotero.sqlite").touch()
+    attempts = []
+
+    def unavailable(path):
+        attempts.append(path)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(zotero, "_snapshot", unavailable)
+    config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    with resolution_session():
+        assert zotero.search_sqlite("Jenny 2006", config) == []
+        assert zotero.by_doi("10.1000/jenny", config) is None
+    assert len(attempts) == 1
+    with resolution_session():
+        assert zotero.search_sqlite("Jenny 2006", config) == []
+    assert len(attempts) == 2
+
+
+def test_zotero_api_attachment_budget_preserves_metadata(monkeypatch):
+    clock = [0.0]
+    requested = []
+    monkeypatch.setattr(zotero.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(zotero, "API_BUDGET_SECONDS", 0.5)
+
+    def get(self, url, **kwargs):
+        requested.append(url)
+        assert kwargs["timeout"] <= 0.5
+        if url.endswith("/top"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"key": str(index), "data": {"title": "Jenny paper", "date": "2006"}}
+                    for index in range(5)
+                ],
+                request=httpx.Request("GET", url),
+            )
+        clock[0] = 0.6
+        raise httpx.ReadTimeout("Desktop API stalled")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    results = zotero.search_api("Jenny paper", Config())
+    assert len(results) == 5
+    assert all(article.local_pdf is None for article in results)
+    assert len(requested) == 2

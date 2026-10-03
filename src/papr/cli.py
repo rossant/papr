@@ -19,7 +19,7 @@ from .input import load_input, materialize_article
 from .model import Article
 from .progress import ProgressLogHandler, Reporter, emit, pause
 from .resolvers import resolve
-from .resolvers.common import extract_doi, extract_pmid
+from .resolvers.common import extract_doi, extract_pmid, extract_year
 from .resolvers.session import resolution_session
 from .selection import select_candidate
 from .sources import statuses as source_statuses
@@ -229,6 +229,27 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
         return _run_get_reported(args, config, reporter)
 
 
+def _input_values(values: list[str]) -> list[str]:
+    """Keep an unquoted author/year citation together without merging batch inputs."""
+    if len(values) < 2:
+        return values
+    years = [value for value in values if value.isdigit() and extract_year(value)]
+    if len(years) != 1:
+        return values
+    for value in values:
+        path = Path(value).expanduser()
+        if (
+            any(char.isspace() for char in value)
+            or path.exists()
+            or path.suffix.lower() in {".pdf", ".txt", ".refs", ".bib", ".json"}
+            or extract_doi(value)
+            or extract_pmid(value)
+            or "://" in value
+        ):
+            return values
+    return [" ".join(values)]
+
+
 def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Reporter) -> int:
     formats = args.formats or config.formats
     output_dir = (args.output or config.download_dir).expanduser()
@@ -238,7 +259,7 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
     report: list[dict] = []
     failures = 0
     items: list[str | Article | Path] = []
-    for value in args.inputs:
+    for value in _input_values(args.inputs):
         started = perf_counter()
         try:
             emit("input", f"Loading {value}")
