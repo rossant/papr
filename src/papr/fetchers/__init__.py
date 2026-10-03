@@ -33,6 +33,15 @@ def fetch_pdf(
         shutil.copy2(cache, destination)
         return "cache"
 
+    if article.local_pdf:
+        local = Path(article.local_pdf).expanduser()
+        if local.exists() and local.read_bytes()[:5] == b"%PDF-":
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, cache)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cache, destination)
+            return f"local:{local}"
+
     temp = cache.with_suffix(".tmp.pdf")
     temp.parent.mkdir(parents=True, exist_ok=True)
     source = oa.fetch(article, temp, config)

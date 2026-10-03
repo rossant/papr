@@ -10,6 +10,10 @@ from platformdirs import user_cache_dir, user_config_dir, user_data_dir
 DEFAULT_TEMPLATE = '{{ firstCreator suffix="_" }}{{ year suffix="_" }}{{ title truncate="100" }}'
 
 
+def _path(value: str | None) -> Path | None:
+    return Path(value).expanduser() if value else None
+
+
 @dataclass
 class Config:
     download_dir: Path = field(default_factory=lambda: Path.home() / "Downloads")
@@ -26,6 +30,12 @@ class Config:
     auto_accept_score: float = 0.78
     auto_accept_margin: float = 0.08
     max_candidates: int = 5
+    local_sources: bool = True
+    zotero_api_url: str = "http://127.0.0.1:23119/api"
+    zotero_data_dir: Path | None = None
+    zolit_repo: Path | None = None
+    zolit_db: Path | None = None
+    zolit_sbs_repo: Path | None = None
 
     @property
     def config_dir(self) -> Path:
@@ -78,7 +88,19 @@ class Config:
             cfg.auto_accept_score = float(match.get("auto_accept_score", cfg.auto_accept_score))
             cfg.auto_accept_margin = float(match.get("auto_accept_margin", cfg.auto_accept_margin))
             cfg.max_candidates = int(match.get("max_candidates", cfg.max_candidates))
+            local = data.get("local", {})
+            cfg.local_sources = bool(local.get("enabled", cfg.local_sources))
+            cfg.zotero_api_url = local.get("zotero_api_url", cfg.zotero_api_url)
+            cfg.zotero_data_dir = _path(local.get("zotero_data_dir"))
+            cfg.zolit_repo = _path(local.get("zolit_repo"))
+            cfg.zolit_db = _path(local.get("zolit_db"))
+            cfg.zolit_sbs_repo = _path(local.get("zolit_sbs_repo"))
         cfg.email = os.getenv("PAPR_EMAIL", cfg.email)
         cfg.unpaywall_email = os.getenv("UNPAYWALL_EMAIL", cfg.unpaywall_email or cfg.email)
         cfg.openalex_api_key = os.getenv("OPENALEX_API_KEY", cfg.openalex_api_key)
+        cfg.zotero_api_url = os.getenv("PAPR_ZOTERO_API_URL", cfg.zotero_api_url)
+        cfg.zotero_data_dir = _path(os.getenv("PAPR_ZOTERO_DATA_DIR")) or cfg.zotero_data_dir
+        cfg.zolit_repo = _path(os.getenv("PAPR_ZOLIT_REPO")) or cfg.zolit_repo
+        cfg.zolit_db = _path(os.getenv("PAPR_ZOLIT_DB")) or cfg.zolit_db
+        cfg.zolit_sbs_repo = _path(os.getenv("PAPR_ZOLIT_SBS_REPO")) or cfg.zolit_sbs_repo
         return cfg

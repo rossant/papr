@@ -31,6 +31,7 @@ class Article:
     abstract: str | None = None
     item_type: str = "article-journal"
     oa_pdf_url: str | None = None
+    local_pdf: str | None = None
     source: str | None = None
     score: float | None = None
 
@@ -47,8 +48,18 @@ class Article:
     def merge(self, other: Article) -> Article:
         """Fill missing fields from another representation of the same work."""
         for name in (
-            "year", "journal", "volume", "issue", "pages", "doi", "pmid", "pmcid",
-            "url", "abstract", "oa_pdf_url",
+            "year",
+            "journal",
+            "volume",
+            "issue",
+            "pages",
+            "doi",
+            "pmid",
+            "pmcid",
+            "url",
+            "abstract",
+            "oa_pdf_url",
+            "local_pdf",
         ):
             if not getattr(self, name) and getattr(other, name):
                 setattr(self, name, getattr(other, name))

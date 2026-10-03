@@ -13,6 +13,7 @@ DOI_RE = re.compile(
 )
 PMID_RE = re.compile(r"(?:pmid:\s*)?(\d{5,10})$", re.I)
 YEAR_RE = re.compile(r"\b(18|19|20|21)\d{2}\b")
+WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
 
 
 def normalize_doi(value: str | None) -> str | None:
@@ -34,19 +35,37 @@ def extract_pmid(query: str) -> str | None:
     return None
 
 
+def extract_year(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = YEAR_RE.search(value)
+    return int(match.group(0)) if match else None
+
+
 def score_article(query: str, article: Article) -> float:
     q = query.casefold()
+    words = [w.casefold() for w in WORD_RE.findall(query)]
+    years = [int(m.group(0)) for m in YEAR_RE.finditer(query)]
+    non_year_words = [w for w in words if not w.isdigit()]
+
     title_score = token_set_ratio(q, article.title.casefold()) / 100.0 if article.title else 0.0
     author_score = 0.0
-    if article.authors:
+    if article.authors and non_year_words:
         author_score = max(
-            ratio(q.split()[0] if q.split() else "", a.family.casefold()) / 100.0
-            for a in article.authors[:3]
+            ratio(word, author.family.casefold()) / 100.0
+            for word in non_year_words
+            for author in article.authors[:3]
+            if author.family
         )
-    years = [int(m.group(0)) for m in YEAR_RE.finditer(query)]
     year_score = 1.0 if article.year and article.year in years else (0.45 if not years else 0.0)
     doi_bonus = 1.0 if article.doi and article.doi.casefold() in q else 0.0
-    return min(1.0, 0.60 * title_score + 0.20 * author_score + 0.15 * year_score + 0.05 * doi_bonus)
+
+    if years and len(non_year_words) <= 3:
+        score = 0.64 * author_score + 0.30 * year_score + 0.06 * title_score
+    else:
+        score = 0.58 * title_score + 0.20 * author_score + 0.17 * year_score
+        score += 0.05 * doi_bonus
+    return min(1.0, score)
 
 
 def deduplicate(articles: Iterable[Article]) -> list[Article]:
