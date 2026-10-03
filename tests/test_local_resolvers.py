@@ -4,6 +4,7 @@ from pathlib import Path
 
 from papr.config import Config
 from papr.resolvers import zolit, zolit_sbs, zotero
+from papr.resolvers.session import resolution_session
 
 
 def _make_zotero_db(path: Path) -> None:
@@ -57,9 +58,7 @@ def test_zotero_api_item_mapping():
                 "date": "2020-04-01",
                 "DOI": "10.1000/ABC",
                 "publicationTitle": "Journal",
-                "creators": [
-                    {"creatorType": "author", "firstName": "Jane", "lastName": "Smith"}
-                ],
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Smith"}],
             },
         }
     )
@@ -144,3 +143,31 @@ def test_zolit_sbs_seed_parser(tmp_path: Path):
     assert len(result) == 1
     assert result[0].title == "Le syndrome du bebe secoue"
     assert result[0].source == "zolit-sbs"
+
+
+def test_zotero_batch_reuses_snapshot_and_bulk_attachment_query(tmp_path, monkeypatch):
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _make_zotero_db(data_dir / "zotero.sqlite")
+    original = zotero._snapshot
+    snapshots = []
+    queries = []
+
+    def snapshot(path):
+        snapshots.append(path)
+        conn = original(path)
+        conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(zotero, "_snapshot", snapshot)
+    config = Config(zotero_api_url="", zotero_data_dir=data_dir)
+    with resolution_session():
+        first = zotero.search_sqlite("Jenny 2006", config)
+        first[0].pmid = "123456"
+        found = zotero.by_doi("10.1000/jenny", config)
+        assert found.pmid is None
+        assert len(snapshots) == 1
+        assert sum("from itemAttachments" in query for query in queries) == 1
+    with resolution_session():
+        zotero.search_sqlite("Jenny 2006", config)
+    assert len(snapshots) == 2

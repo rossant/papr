@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import tempfile
 from pathlib import Path
 
 from ..config import Config
@@ -38,32 +39,37 @@ def fetch_pdf(
     refresh: bool = False,
 ) -> str:
     cache = _cache_path(article, config)
-    if cache.exists() and not refresh:
+    local = None
+    if article.local_pdf:
+        candidate = Path(article.local_pdf).expanduser()
+        if _is_local_pdf(candidate):
+            local = candidate
+    if local is None and not refresh and _is_local_pdf(cache):
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cache, destination)
+        if cache.resolve() != destination.resolve():
+            shutil.copy2(cache, destination)
         return "cache"
 
-    if article.local_pdf:
-        local = Path(article.local_pdf).expanduser()
-        if _is_local_pdf(local):
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(local, cache)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cache, destination)
-            return f"local:{local}"
-
-    temp = cache.with_suffix(".tmp.pdf")
-    temp.parent.mkdir(parents=True, exist_ok=True)
-    source = oa.fetch(article, temp, config)
-    if not source and allow_ucl:
-        source = ucl.fetch(article, temp, config)
-    if not source:
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=cache.parent, suffix=".tmp.pdf", delete=False) as file:
+        temp = Path(file.name)
+    try:
+        if local is not None:
+            shutil.copy2(local, temp)
+            source = f"local:{local}"
+        else:
+            source = oa.fetch(article, temp, config)
+            if source and not _is_local_pdf(temp):
+                source = None
+            if not source and allow_ucl:
+                temp.unlink(missing_ok=True)
+                source = ucl.fetch(article, temp, config)
+            if not source or not _is_local_pdf(temp):
+                raise PdfUnavailable(f"No valid PDF found for {article.doi or article.title}")
+        temp.replace(cache)
+    finally:
         temp.unlink(missing_ok=True)
-        raise PdfUnavailable(f"No PDF found for {article.doi or article.title}")
-    if not temp.read_bytes().startswith(b"%PDF-"):
-        temp.unlink(missing_ok=True)
-        raise PdfUnavailable("Downloaded content is not a PDF")
-    temp.replace(cache)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(cache, destination)
+    if cache.resolve() != destination.resolve():
+        shutil.copy2(cache, destination)
     return source

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 from pathlib import Path
 from urllib.parse import urljoin
 
+import httpx
+
 from ..config import Config
 from ..http import client
 from ..model import Article
+
+logger = logging.getLogger(__name__)
 
 PDF_META_RE = re.compile(
     r'<meta[^>]+(?:name|property)=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)',
@@ -17,7 +22,8 @@ PDF_LINK_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', 
 
 
 def is_pdf(content: bytes, content_type: str = "") -> bool:
-    return content.startswith(b"%PDF-") or "application/pdf" in content_type.lower()
+    # Publishers sometimes label error pages as PDFs; require the file signature.
+    return content.startswith(b"%PDF-")
 
 
 def _download(url: str) -> tuple[bytes, str, str] | None:
@@ -35,7 +41,11 @@ def _download(url: str) -> tuple[bytes, str, str] | None:
         candidates += [html.unescape(x) for x in PDF_LINK_RE.findall(text)]
         for candidate in candidates[:8]:
             pdf_url = urljoin(str(r.url), candidate)
-            pr = c.get(pdf_url)
+            try:
+                pr = c.get(pdf_url)
+            except httpx.HTTPError:
+                logger.debug("PDF link download failed: %s", pdf_url, exc_info=True)
+                continue
             if pr.status_code < 400 and is_pdf(pr.content, pr.headers.get("content-type", "")):
                 return pr.content, str(pr.url), pr.headers.get("content-type", "")
     return None
@@ -51,7 +61,7 @@ def _unpaywall_url(article: Article, config: Config) -> str | None:
         )
         if r.status_code >= 400:
             return None
-        best = (r.json().get("best_oa_location") or {})
+        best = r.json().get("best_oa_location") or {}
         return best.get("url_for_pdf") or best.get("url")
 
 
@@ -64,7 +74,7 @@ def candidate_urls(article: Article, config: Config) -> list[str]:
         if upw:
             urls.append(upw)
     except Exception:
-        pass
+        logger.debug("Unpaywall lookup failed", exc_info=True)
     if article.pmcid:
         pmcid = article.pmcid.upper()
         if not pmcid.startswith("PMC"):
@@ -83,6 +93,7 @@ def fetch(article: Article, destination: Path, config: Config) -> str | None:
         try:
             result = _download(url)
         except Exception:
+            logger.debug("PDF candidate download failed: %s", url, exc_info=True)
             continue
         if not result:
             continue

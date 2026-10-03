@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from ..config import Config
 from ..model import Article
 from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
 from .common import deduplicate, extract_doi, extract_pmid
+
+logger = logging.getLogger(__name__)
 
 LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search)
 LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi)
@@ -15,6 +19,7 @@ def _local_search(query: str, config: Config) -> list[Article]:
         try:
             articles.extend(searcher(query, config))
         except Exception:
+            logger.debug("Resolver %s failed", searcher.__module__, exc_info=True)
             continue
     result = deduplicate(articles)
     result.sort(key=lambda a: a.score or 0.0, reverse=True)
@@ -29,6 +34,7 @@ def _local_by_doi(doi: str, config: Config) -> list[Article]:
             if article:
                 articles.append(article)
         except Exception:
+            logger.debug("DOI resolver %s failed", lookup.__module__, exc_info=True)
             continue
     return deduplicate(articles)
 
@@ -51,6 +57,7 @@ def _remote_search(query: str, config: Config) -> list[Article]:
         try:
             articles.extend(searcher(query, config))
         except Exception:
+            logger.debug("Resolver %s failed", searcher.__module__, exc_info=True)
             continue
     return articles
 
@@ -82,6 +89,7 @@ def resolve(
                 if item:
                     remote.append(item)
             except Exception:
+                logger.debug("DOI resolver %s failed", fn.__module__, exc_info=True)
                 continue
         return deduplicate([*local, *remote])
 
@@ -97,9 +105,10 @@ def resolve(
                     if oa:
                         article.merge(oa)
                 except Exception:
-                    pass
+                    logger.debug("OpenAlex PMID enrichment failed", exc_info=True)
             return [article] if article else []
         except Exception:
+            logger.debug("PubMed resolver failed", exc_info=True)
             return []
 
     local: list[Article] = []

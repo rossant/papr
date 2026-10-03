@@ -32,6 +32,7 @@ def _count_sqlite(path: Path, table: str) -> int | None:
 
 def _zotero_status(config: Config) -> SourceStatus:
     base = config.zotero_api_url.rstrip("/")
+    unavailable = "not detected"
     if base:
         try:
             with httpx.Client(timeout=0.6, headers={"Zotero-API-Version": "3"}) as client:
@@ -46,13 +47,13 @@ def _zotero_status(config: Config) -> SourceStatus:
                         detail += f", {count} top-level items"
                     return SourceStatus("zotero", True, detail)
                 if r.status_code == 403:
-                    return SourceStatus("zotero", False, "local API disabled in Zotero")
+                    unavailable = "local API disabled in Zotero"
         except httpx.HTTPError:
             pass
     data_dir = zotero.find_data_dir(config)
     if data_dir:
         return SourceStatus("zotero", True, f"SQLite fallback: {data_dir}")
-    return SourceStatus("zotero", False, "not detected")
+    return SourceStatus("zotero", False, unavailable)
 
 
 def _zolit_status(config: Config) -> SourceStatus:

@@ -20,7 +20,12 @@ def normalize_doi(value: str | None) -> str | None:
     if not value:
         return None
     match = DOI_RE.search(value.strip())
-    return match.group(1).rstrip(".,;)]").lower() if match else None
+    if not match:
+        return None
+    doi = match.group(1).rstrip(".,;")
+    while doi.endswith(")") and doi.count(")") > doi.count("("):
+        doi = doi[:-1].rstrip(".,;")
+    return doi.lower()
 
 
 def extract_doi(query: str) -> str | None:
@@ -48,14 +53,28 @@ def score_article(query: str, article: Article) -> float:
     years = [int(m.group(0)) for m in YEAR_RE.finditer(query)]
     non_year_words = [w for w in words if not w.isdigit()]
 
+    title_words = [w.casefold() for w in WORD_RE.findall(article.title)]
+    if title_words and (
+        words == title_words
+        or (
+            years
+            and article.year in years
+            and non_year_words == [w for w in title_words if not w.isdigit()]
+        )
+    ):
+        return 0.95
+
     title_score = token_set_ratio(q, article.title.casefold()) / 100.0 if article.title else 0.0
     author_score = 0.0
     if article.authors and non_year_words:
         author_score = max(
-            ratio(word, author.family.casefold()) / 100.0
-            for word in non_year_words
-            for author in article.authors[:3]
-            if author.family
+            (
+                ratio(word, author.family.casefold()) / 100.0
+                for word in non_year_words
+                for author in article.authors[:3]
+                if author.family
+            ),
+            default=0.0,
         )
     year_score = 1.0 if article.year and article.year in years else (0.45 if not years else 0.0)
     doi_bonus = 1.0 if article.doi and article.doi.casefold() in q else 0.0
@@ -70,14 +89,27 @@ def score_article(query: str, article: Article) -> float:
 
 def deduplicate(articles: Iterable[Article]) -> list[Article]:
     out: list[Article] = []
-    by_key: dict[str, Article] = {}
     for article in articles:
-        key = article.doi or f"{article.title.casefold()}|{article.year or ''}"
-        if key in by_key:
-            by_key[key].merge(article)
-            if (article.score or 0) > (by_key[key].score or 0):
-                by_key[key].score = article.score
+        article.doi = normalize_doi(article.doi) or article.doi
+        title = " ".join(WORD_RE.findall(article.title.casefold()))
+        duplicate = next(
+            (
+                existing
+                for existing in out
+                if (article.doi and existing.doi == article.doi)
+                or (
+                    title
+                    and title == " ".join(WORD_RE.findall(existing.title.casefold()))
+                    and article.year == existing.year
+                    and not (article.doi and existing.doi and article.doi != existing.doi)
+                )
+            ),
+            None,
+        )
+        if duplicate is not None:
+            duplicate.merge(article)
+            if (article.score or 0) > (duplicate.score or 0):
+                duplicate.score = article.score
             continue
-        by_key[key] = article
         out.append(article)
     return out

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,9 @@ import httpx
 from ..config import Config
 from ..model import Article, Person
 from .common import extract_year, normalize_doi, score_article
+from .session import cached_library
+
+logger = logging.getLogger(__name__)
 
 NON_BIB_TYPES = {"attachment", "note", "annotation"}
 FIELD_NAMES = {
@@ -219,6 +223,19 @@ def _sqlite_articles(conn: sqlite3.Connection, data_dir: Path) -> list[tuple[int
                 "name": name,
             }
         )
+    attachment_rows = conn.execute(
+        """
+        select ia.parentItemID, child.key, ia.path, ia.contentType
+        from itemAttachments ia
+        join items child on child.itemID = ia.itemID
+        order by ia.itemID
+        """
+    ).fetchall()
+    attachments: dict[int, str] = {}
+    for attachment in attachment_rows:
+        path = _attachment_path(attachment, data_dir)
+        if path:
+            attachments.setdefault(attachment["parentItemID"], str(path))
     out = []
     for row in rows:
         values = fields.get(row["itemID"], {})
@@ -240,7 +257,7 @@ def _sqlite_articles(conn: sqlite3.Connection, data_dir: Path) -> list[tuple[int
         }
         article = from_api_item(item)
         if article:
-            article.local_pdf = _sqlite_attachment(conn, row["itemID"], data_dir)
+            article.local_pdf = attachments.get(row["itemID"])
             out.append((row["itemID"], article))
     return out
 
@@ -257,27 +274,36 @@ def _sqlite_attachment(conn: sqlite3.Connection, item_id: int, data_dir: Path) -
         (item_id,),
     ).fetchall()
     for row in rows:
-        raw = row["path"] or ""
-        if row["contentType"] != "application/pdf" and not raw.lower().endswith(".pdf"):
-            continue
-        if raw.startswith("storage:"):
-            path = data_dir / "storage" / row["key"] / raw.removeprefix("storage:")
-        else:
-            path = Path(raw).expanduser()
-        if path.is_absolute() and path.exists():
+        path = _attachment_path(row, data_dir)
+        if path:
             return str(path)
     return None
+
+
+def _attachment_path(row: sqlite3.Row, data_dir: Path) -> Path | None:
+    raw = row["path"] or ""
+    if row["contentType"] != "application/pdf" and not raw.lower().endswith(".pdf"):
+        return None
+    if raw.startswith("storage:"):
+        path = data_dir / "storage" / row["key"] / raw.removeprefix("storage:")
+    else:
+        path = Path(raw).expanduser()
+    return path if path.is_absolute() and path.is_file() else None
 
 
 def _sqlite_all(config: Config) -> list[Article]:
     data_dir = find_data_dir(config)
     if not data_dir:
         return []
-    conn = _snapshot(data_dir / "zotero.sqlite")
-    try:
-        return [article for _, article in _sqlite_articles(conn, data_dir)]
-    finally:
-        conn.close()
+
+    def load() -> list[Article]:
+        conn = _snapshot(data_dir / "zotero.sqlite")
+        try:
+            return [article for _, article in _sqlite_articles(conn, data_dir)]
+        finally:
+            conn.close()
+
+    return cached_library(("zotero", str(data_dir.resolve())), load)
 
 
 def search_sqlite(query: str, config: Config) -> list[Article]:
@@ -299,14 +325,14 @@ def by_doi(doi: str, config: Config) -> Article | None:
                 article.score = 1.0
                 return article
     except (httpx.HTTPError, OSError, ValueError):
-        pass
+        logger.debug("Zotero API unavailable; trying SQLite", exc_info=True)
     try:
         for article in _sqlite_all(config):
             if article.doi == target:
                 article.score = 1.0
                 return article
     except (sqlite3.Error, OSError):
-        pass
+        logger.debug("Zotero SQLite lookup failed", exc_info=True)
     return None
 
 
@@ -316,8 +342,9 @@ def search(query: str, config: Config) -> list[Article]:
         if result:
             return result
     except (httpx.HTTPError, OSError, ValueError):
-        pass
+        logger.debug("Zotero API unavailable; trying SQLite", exc_info=True)
     try:
         return search_sqlite(query, config)
     except (sqlite3.Error, OSError):
+        logger.debug("Zotero SQLite search failed", exc_info=True)
         return []

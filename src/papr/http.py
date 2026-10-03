@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import httpx
 
-USER_AGENT = "papr/0.1 (+https://github.com/rossant/papr)"
+from . import __version__
+
+USER_AGENT = f"papr/{__version__} (+https://github.com/rossant/papr)"
 
 
 def client() -> httpx.Client:

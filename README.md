@@ -164,6 +164,10 @@ papr resolve 10.1542/peds.2006-1172 --json
 Results from multiple sources are deduplicated by DOI or normalized title/year
 and ranked using title, author, and year similarity.
 
+Search results must meet the configured confidence threshold even when only one
+candidate is found. A verified DOI or PMID match is accepted directly. Use
+`--verbose` with retrieval or `papr resolve` to see resolver and download failures.
+
 ## PDF acquisition
 
 The acquisition order is:
@@ -227,6 +231,13 @@ export MISTRAL_API_KEY=...
 
 or the platform config directory's `secrets.env`. OCR results are cached so the
 same PDF is not processed twice.
+Alternatively, put the raw key in the platform config directory's `mistral.key`,
+or point `MISTRAL_API_KEY_FILE` to an existing key file. An explicit
+`MISTRAL_API_KEY` takes precedence.
+
+The processing cache distinguishes native extraction from Mistral OCR and its
+configured model. Adding a Mistral key therefore allows `auto` to process a PDF
+with OCR even if native text was previously cached.
 
 ## Output formats
 
@@ -249,6 +260,7 @@ Supported formats:
 | `json` | normalized papr metadata |
 
 Metadata-only outputs do not require downloading the PDF.
+Both CSL-JSON and papr's normalized JSON exports can be used as input again.
 
 ## Filenames
 
@@ -315,6 +327,7 @@ PAPR_EMAIL
 UNPAYWALL_EMAIL
 OPENALEX_API_KEY
 MISTRAL_API_KEY
+MISTRAL_API_KEY_FILE
 PAPR_ZOTERO_API_URL
 PAPR_ZOTERO_DATA_DIR
 PAPR_ZOLIT_REPO
@@ -329,16 +342,23 @@ papr refs.txt -f pdf,md --non-interactive --report report.json
 ```
 
 The process exits non-zero if at least one item fails.
+Unreadable or malformed input files and corrupt PDFs are recorded in the report;
+other inputs continue processing. Local SQLite libraries are read once per
+command and reused for subsequent references in that batch.
 
 ## Local PDFs
 
 ```bash
 papr unknown.pdf -f md,bib,csl
 papr unknown.pdf --rename
+papr unknown.pdf --rename --dry-run
 ```
 
 For local PDFs, papr looks for a DOI in extracted text, then PDF metadata, and
-attempts bibliographic enrichment.
+attempts bibliographic enrichment using metadata or the filename. The file's
+creation date is not used as the publication year.
+`--local-only` and `--no-local` also control this enrichment. `--dry-run` previews
+the destination without renaming or replacing PDFs.
 
 ## Development
 

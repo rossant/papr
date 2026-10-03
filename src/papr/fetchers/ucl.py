@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from ..model import Article
 from .oa import is_pdf
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
+logger = logging.getLogger(__name__)
 
 
 def _browser_executable() -> str | None:
@@ -70,7 +72,7 @@ def _proxy_url(article: Article) -> str:
 
 def _candidate_urls(page) -> list[str]:
     urls = page.evaluate(
-        """() => {
+        r"""() => {
             const out = [];
             const m = document.querySelector('meta[name="citation_pdf_url"]');
             if (m?.content) out.push(m.content);
@@ -115,6 +117,7 @@ def fetch(article: Article, destination: Path, config: Config) -> str | None:
                         destination.write_bytes(body)
                         return r.url
                 except Exception:
+                    logger.debug("UCL PDF candidate failed: %s", url, exc_info=True)
                     continue
         finally:
             context.close()

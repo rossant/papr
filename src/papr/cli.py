@@ -2,25 +2,53 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import __version__
 from .config import DEFAULT_TEMPLATE, Config
-from .export import FORMAT_SUFFIX, export_outputs
-from .fetchers import PdfUnavailable, fetch_pdf, ucl
+from .export import FORMAT_SUFFIX, export_outputs, output_suffix
+from .fetchers import fetch_pdf, ucl
 from .filename import basename
-from .input import load_input
-from .local import article_from_pdf
+from .input import load_input, materialize_article
 from .model import Article
 from .resolvers import resolve
+from .resolvers.common import extract_doi, extract_pmid
+from .resolvers.session import resolution_session
+from .selection import select_candidate
 from .sources import statuses as source_statuses
+
+
+@contextmanager
+def _diagnostics(verbose: bool):
+    logger = logging.getLogger("papr")
+    if not verbose:
+        yield
+        return
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate
 
 
 def _formats(value: str) -> list[str]:
     items = [x.strip().lower() for x in value.split(",") if x.strip()]
+    if not items:
+        raise argparse.ArgumentTypeError("at least one output format is required")
     unknown = sorted(set(items) - set(FORMAT_SUFFIX))
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown format(s): {', '.join(unknown)}")
@@ -37,16 +65,11 @@ def _article_line(article: Article) -> str:
 
 
 def _choose(query: str, candidates: list[Article], config: Config, interactive: bool) -> Article:
-    if not candidates:
-        raise LookupError(f"No bibliographic match for: {query}")
-    if len(candidates) == 1:
-        return candidates[0]
-    first = candidates[0].score or 0.0
-    second = candidates[1].score or 0.0
-    if first >= config.auto_accept_score and first - second >= config.auto_accept_margin:
-        return candidates[0]
-    if not interactive:
-        raise LookupError(f"Ambiguous reference: {query}")
+    try:
+        return select_candidate(query, candidates, config)
+    except LookupError:
+        if not interactive or not candidates or extract_doi(query) or extract_pmid(query):
+            raise
     print(f"Ambiguous reference: {query}", file=sys.stderr)
     for i, item in enumerate(candidates, 1):
         score = f" [{item.score:.2f}]" if item.score is not None else ""
@@ -67,30 +90,17 @@ def _resolve_item(
     use_local: bool = True,
     use_remote: bool = True,
 ) -> tuple[Article, Path | None]:
-    if isinstance(item, Article):
-        if item.doi:
-            richer = resolve(
-                item.doi,
-                config,
-                use_local=use_local,
-                use_remote=use_remote,
-            )
-            if richer:
-                richer[0].merge(item)
-                return richer[0], None
-        return item, None
-    if isinstance(item, Path):
-        return article_from_pdf(item, config), item
-    candidates = resolve(
+    return materialize_article(
         item,
         config,
         use_local=use_local,
         use_remote=use_remote,
+        chooser=lambda query, candidates, cfg: _choose(query, candidates, cfg, interactive),
     )
-    return _choose(item, candidates, config, interactive), None
 
 
 def _add_source_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--verbose", action="store_true", help="show diagnostic details")
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--local-only",
@@ -177,20 +187,20 @@ def _config_init(config: Config) -> int:
             '# email = "you@example.org"\n'
             '# unpaywall_email = "you@example.org"\n'
             '# openalex_api_key = "..."\n\n'
-            '[filename]\n'
+            "[filename]\n"
             f"template = '{DEFAULT_TEMPLATE}'\n"
-            'max_length = 180\n'
-            'ascii = false\n'
+            "max_length = 180\n"
+            "ascii = false\n"
             'space = "_"\n\n'
-            '[processors.md]\n'
+            "[processors.md]\n"
             'backend = "auto"  # auto, mistral, native\n'
             'model = "mistral-ocr-latest"\n\n'
-            '[matching]\n'
-            'auto_accept_score = 0.78\n'
-            'auto_accept_margin = 0.08\n'
-            'max_candidates = 5\n\n'
-            '[local]\n'
-            'enabled = true\n'
+            "[matching]\n"
+            "auto_accept_score = 0.78\n"
+            "auto_accept_margin = 0.08\n"
+            "max_candidates = 5\n\n"
+            "[local]\n"
+            "enabled = true\n"
             'zotero_api_url = "http://127.0.0.1:23119/api"\n'
             '# zotero_data_dir = "~/Zotero"\n'
             '# zolit_repo = "~/src/zolit"\n'
@@ -213,7 +223,13 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
     failures = 0
     items: list[str | Article | Path] = []
     for value in args.inputs:
-        items.extend(load_input(value, config))
+        try:
+            items.extend(load_input(value, config))
+        except Exception as exc:
+            failures += 1
+            logging.getLogger(__name__).debug("Input loading failed: %s", value, exc_info=True)
+            print(f"✗ {value}: {exc}", file=sys.stderr)
+            report.append({"input": value, "status": "error", "error": str(exc)})
 
     for item in items:
         label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
@@ -241,16 +257,25 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                         from .filename import collision_safe_path
 
                         destination = collision_safe_path(destination)
-                    if destination.exists() and args.overwrite:
-                        destination.unlink()
-                    local_pdf.rename(destination)
+                    if not args.dry_run:
+                        if args.overwrite:
+                            local_pdf.replace(destination)
+                        else:
+                            local_pdf.rename(destination)
                 print(f"✓ {destination}")
-                row.update(status="ok", source="local", outputs=[str(destination)])
+                row.update(
+                    status="dry-run" if args.dry_run else "ok",
+                    source="local",
+                    outputs=[str(destination)],
+                )
                 report.append(row)
                 continue
             base = basename(article, config, args.filename)
             if args.dry_run:
-                planned = [str(local_output / f"{base}{FORMAT_SUFFIX[f]}") for f in local_formats]
+                planned = [
+                    str(local_output / f"{base}{output_suffix(f, local_formats)}")
+                    for f in local_formats
+                ]
                 print(f"✓ {_article_line(article)}")
                 for path in planned:
                     print(f"  {path}")
@@ -293,8 +318,9 @@ def _run_get(args: argparse.Namespace, config: Config) -> int:
                 processor=processor_used,
                 outputs=[str(x) for x in outputs],
             )
-        except (LookupError, PdfUnavailable, RuntimeError, ValueError, OSError) as exc:
+        except Exception as exc:
             failures += 1
+            logging.getLogger(__name__).debug("Processing failed: %s", label, exc_info=True)
             print(f"✗ {label}: {exc}", file=sys.stderr)
             row.update(status="error", error=str(exc))
         report.append(row)
@@ -320,7 +346,11 @@ def main(argv: list[str] | None = None) -> int:
     if argv in (["--version"], ["-V"]):
         print(__version__)
         return 0
-    config = Config.load()
+    try:
+        config = Config.load()
+    except (ValueError, OSError) as exc:
+        print(f"✗ Configuration: {exc}", file=sys.stderr)
+        return 1
     if argv and argv[0] == "login":
         args = _login_parser().parse_args(argv[1:])
         if args.institution == "ucl":
@@ -336,12 +366,13 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "resolve":
         args = _resolve_parser().parse_args(argv[1:])
         query = " ".join(args.query)
-        candidates = resolve(
-            query,
-            config,
-            use_local=not args.no_local,
-            use_remote=not args.local_only,
-        )
+        with _diagnostics(args.verbose), resolution_session():
+            candidates = resolve(
+                query,
+                config,
+                use_local=not args.no_local,
+                use_remote=not args.local_only,
+            )
         if args.json:
             print(json.dumps([a.to_dict() for a in candidates], indent=2, ensure_ascii=False))
         else:
@@ -358,7 +389,9 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         _get_parser().print_help()
         return 0
-    return _run_get(_get_parser().parse_args(argv), config)
+    args = _get_parser().parse_args(argv)
+    with _diagnostics(args.verbose), resolution_session():
+        return _run_get(args, config)
 
 
 if __name__ == "__main__":

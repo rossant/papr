@@ -8,6 +8,7 @@ from pathlib import Path
 from ..config import Config
 from ..model import Article, Person
 from .common import normalize_doi, score_article
+from .session import cached_library
 
 
 def _config_paths(config: Config) -> list[Path]:
@@ -112,7 +113,9 @@ def _local_pdf(conn: sqlite3.Connection, item_key: str) -> str | None:
     return None
 
 
-def _article_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Article:
+def _article_from_row(
+    conn: sqlite3.Connection, row: sqlite3.Row, local_pdfs: dict[str, str] | None = None
+) -> Article:
     fields = _fields(row["zotero_json"])
     try:
         year = int(row["year"]) if row["year"] else None
@@ -129,33 +132,57 @@ def _article_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Article:
         doi=normalize_doi(row["doi"]),
         url=fields.get("url") or None,
         abstract=fields.get("abstractNote") or None,
-        local_pdf=_local_pdf(conn, row["item_key"]),
+        local_pdf=(
+            local_pdfs.get(row["item_key"])
+            if local_pdfs is not None
+            else _local_pdf(conn, row["item_key"])
+        ),
         source="zolit",
     )
+
+
+def _all_articles(db: Path) -> list[Article]:
+    def load() -> list[Article]:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                select item_key, title, year, creators_json, doi, zotero_json
+                from items where title is not null and title != ''
+                """
+            ).fetchall()
+            local_pdfs: dict[str, str] = {}
+            try:
+                attachments = conn.execute(
+                    """
+                    select item_key, path from attachments
+                    where exists_on_disk = 1
+                      and (content_type = 'application/pdf' or lower(path) like '%.pdf')
+                    order by attachment_key
+                    """
+                ).fetchall()
+            except sqlite3.Error:
+                attachments = []
+            for attachment in attachments:
+                path = attachment["path"]
+                if path and Path(path).expanduser().is_file():
+                    local_pdfs.setdefault(attachment["item_key"], str(Path(path).expanduser()))
+            return [_article_from_row(conn, row, local_pdfs) for row in rows]
+        finally:
+            conn.close()
+
+    return cached_library(("zolit", str(db.resolve())), load)
 
 
 def search(query: str, config: Config) -> list[Article]:
     db = find_db(config)
     if not db:
         return []
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            """
-            select item_key, title, year, creators_json, doi, zotero_json
-            from items
-            where title is not null and title != ''
-            """
-        ).fetchall()
-        articles = []
-        for row in rows:
-            article = _article_from_row(conn, row)
-            article.score = score_article(query, article)
-            if (article.score or 0.0) >= 0.35:
-                articles.append(article)
-    finally:
-        conn.close()
+    articles = _all_articles(db)
+    for article in articles:
+        article.score = score_article(query, article)
+    articles = [a for a in articles if (a.score or 0.0) >= 0.35]
     articles.sort(key=lambda a: a.score or 0.0, reverse=True)
     return articles[: config.max_candidates]
 
@@ -165,21 +192,8 @@ def by_doi(doi: str, config: Config) -> Article | None:
     db = find_db(config)
     if not target or not db:
         return None
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            """
-            select item_key, title, year, creators_json, doi, zotero_json
-            from items where lower(doi) = ?
-            limit 1
-            """,
-            (target,),
-        ).fetchone()
-        if not row:
-            return None
-        article = _article_from_row(conn, row)
-        article.score = 1.0
-        return article
-    finally:
-        conn.close()
+    for article in _all_articles(db):
+        if article.doi == target:
+            article.score = 1.0
+            return article
+    return None

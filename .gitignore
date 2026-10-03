@@ -8,4 +8,6 @@ build/
 *.egg-info/
 .env
 secrets.env
+.mistral
+mistral.key
 .DS_Store
