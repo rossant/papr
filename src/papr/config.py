@@ -44,6 +44,7 @@ class Config:
     zolit_db: Path | None = None
     zolit_sbs_repo: Path | None = None
     zotero_collection: str | None = None
+    zotero_group_id: int | None = None
     pdf_compress: bool = True
     pdf_compression_dpi: int = 200
     pdf_compression_timeout: int = 120
@@ -88,6 +89,12 @@ class Config:
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
+        if self.zotero_group_id is not None and (
+            isinstance(self.zotero_group_id, bool)
+            or not isinstance(self.zotero_group_id, int)
+            or self.zotero_group_id <= 0
+        ):
+            raise ValueError("zotero.group_id must be a positive integer")
         if self.zotero_collection is not None and not self.zotero_collection.strip():
             raise ValueError("zotero.collection must be a non-empty string")
         for name in ("filename_ascii", "local_sources", "pdf_compress"):
@@ -174,6 +181,7 @@ class Config:
             cfg.max_candidates = matching.get("max_candidates", cfg.max_candidates)
             cfg.local_sources = local.get("enabled", cfg.local_sources)
             cfg.zotero_collection = zotero.get("collection", cfg.zotero_collection)
+            cfg.zotero_group_id = zotero.get("group_id", cfg.zotero_group_id)
             cfg.pdf_compress = pdf.get("compress", cfg.pdf_compress)
             cfg.pdf_compression_dpi = pdf.get("dpi", cfg.pdf_compression_dpi)
             cfg.pdf_compression_timeout = pdf.get("timeout", cfg.pdf_compression_timeout)
@@ -209,6 +217,7 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
     """Update a supported personal setting while preserving unrelated configuration."""
     fields = {
         "zotero.collection": ("zotero_collection", str),
+        "zotero.group_id": ("zotero_group_id", int),
         "pdf.compress": ("pdf_compress", bool),
         "pdf.dpi": ("pdf_compression_dpi", int),
         "pdf.timeout": ("pdf_compression_timeout", int),
@@ -227,6 +236,9 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
             raise ValueError(f"{key} must be a positive integer") from None
     else:
         value = raw_value
+    unset = key == "zotero.collection" and raw_value == ""
+    if unset:
+        value = None
     from dataclasses import replace
 
     replace(config, **{attribute: value})  # Validate before touching the existing file.
@@ -234,7 +246,7 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     data = tomllib.loads(text)
     table, field = key.split(".", 1)
-    literal = json.dumps(value, ensure_ascii=False)
+    literal = json.dumps(value, ensure_ascii=False) if not unset else ""
     headers = list(re.finditer(r"(?m)^[ \t]*\[[^\n]+\][ \t]*(?:#.*)?$", text))
     target = next(
         (h for h in headers if re.match(rf"^[ \t]*\[[ \t]*{re.escape(table)}[ \t]*\]", h.group())),
@@ -242,8 +254,10 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
     )
     if table in data and not isinstance(data[table], dict):
         raise ValueError(f"{table} must be a TOML table")
-    assignment = f"{field} = {literal}\n"
+    assignment = f"{field} = {literal}\n" if not unset else ""
     if target is None:
+        if unset and field not in data.get(table, {}):
+            return path
         if table in data:
             raise ValueError(f"Edit {path} to change the inline {table} table")
         text = text.rstrip() + f"\n\n[{table}]\n" + assignment
@@ -257,7 +271,7 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
             block = block.rstrip() + "\n" + assignment + "\n"
         text = text[: target.end()] + block + text[end:]
     parsed = tomllib.loads(text)
-    if parsed[table][field] != value:
+    if parsed.get(table, {}).get(field) != value:
         raise ValueError(f"Could not update {key}; edit {path} manually")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None

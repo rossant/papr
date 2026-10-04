@@ -82,6 +82,28 @@ class _API:
         partition = hashlib.sha256(server.encode()).hexdigest()
         self.key_file = config.config_dir / "zotero" / f"{partition}.json"
         self.api_key = None
+        self.group_id = config.zotero_group_id
+        self.prefix = f"/groups/{self.group_id}" if self.group_id is not None else "/users/0"
+        self.library_name = None
+        if self.group_id is not None:
+            try:
+                response = self.request("GET", self.prefix, allow_missing=True)
+            except ZoteroError:
+                raise ZoteroError(
+                    f"Zotero group {self.group_id} is unavailable or inaccessible; "
+                    "check membership and sync the group in Zotero before saving"
+                ) from None
+            if response.status_code == 404:
+                raise ZoteroError(
+                    f"Zotero group {self.group_id} is not available locally; sync it in Zotero"
+                )
+            group = _object_response(response)
+            data = _data(group)
+            identifier = group.get("id", data.get("id"))
+            name = data.get("name")
+            if str(identifier) != str(self.group_id) or not isinstance(name, str) or not name:
+                raise ZoteroError("Zotero returned invalid group metadata; saving was stopped")
+            self.library_name = name
         try:
             saved = json.loads(self.key_file.read_text())
             if saved.get("server_id") == server and isinstance(saved.get("key"), str):
@@ -194,7 +216,7 @@ def _find_parent(api: _API, article: Article, *, pdf_md5: str | None = None) -> 
 
     def query(value: str) -> list[dict]:
         return _list_response(api.request(
-            "GET", "/users/0/items/top",
+            "GET", f"{api.prefix}/items/top",
             params={"q": value, "qmode": "everything", "format": "json"},
         ))
 
@@ -265,7 +287,7 @@ def _collection(api: _API, requested: str | None) -> tuple[str | None, str | Non
     if not requested:
         return None, None
     collections = _list_response(api.request(
-        "GET", "/users/0/collections", params={"format": "json"}
+        "GET", f"{api.prefix}/collections", params={"format": "json"}
     ))
     matches = [item for item in collections if _key(item) == requested]
     if not matches:
@@ -273,7 +295,7 @@ def _collection(api: _API, requested: str | None) -> tuple[str | None, str | Non
     if len(matches) > 1:
         raise ZoteroError("Multiple Zotero collections have that name; specify a collection key")
     item = matches[0] if matches else api.create(
-        "/users/0/collections", {"name": requested, "parentCollection": False}
+        f"{api.prefix}/collections", {"name": requested, "parentCollection": False}
     )
     return _key(item), _data(item).get("name", requested)
 
@@ -309,7 +331,7 @@ def _bibliography(article: Article, collection_key: str | None) -> dict:
 
 def _local_attachment(api: _API, item: dict) -> Path | None:
     response = api.request(
-        "GET", f"/users/0/items/{_key(item)}/file/view/url", allow_missing=True
+        "GET", f"{api.prefix}/items/{_key(item)}/file/view/url", allow_missing=True
     )
     if response.status_code == 404:
         return None
@@ -322,7 +344,7 @@ def _local_attachment(api: _API, item: dict) -> Path | None:
 
 def _has_pdf(api: _API, parent_key: str, md5: str) -> bool:
     children = _list_response(api.request(
-        "GET", f"/users/0/items/{parent_key}/children", params={"format": "json"}
+        "GET", f"{api.prefix}/items/{parent_key}/children", params={"format": "json"}
     ))
     for child in children:
         data = _data(child)
@@ -334,9 +356,11 @@ def _has_pdf(api: _API, parent_key: str, md5: str) -> bool:
     return False
 
 
-def _attachment(api: _API, parent_key: str, pdf: Path, md5: str) -> tuple[dict, bool]:
+def _attachment(
+    api: _API, parent_key: str, pdf: Path, md5: str, *, reuse_existing_pdf: bool = False,
+) -> tuple[dict, bool]:
     children = _list_response(api.request(
-        "GET", f"/users/0/items/{parent_key}/children", params={"format": "json"}
+        "GET", f"{api.prefix}/items/{parent_key}/children", params={"format": "json"}
     ))
     pending = None
     for child in children:
@@ -347,6 +371,15 @@ def _attachment(api: _API, parent_key: str, pdf: Path, md5: str) -> tuple[dict, 
             continue
         # Stored MD5 may describe a remote file; verify the actual local attachment too.
         local = _local_attachment(api, child)
+        if local and reuse_existing_pdf:
+            try:
+                with local.open("rb") as stream:
+                    if b"%PDF-" in stream.read(1024):
+                        # A group's existing PDF is authoritative, even if this export
+                        # was compressed differently. Avoid adding a duplicate attachment.
+                        return child, True
+            except OSError:
+                local = None
         if local and _digest(local) == md5:
             return child, True
         if (
@@ -360,7 +393,7 @@ def _attachment(api: _API, parent_key: str, pdf: Path, md5: str) -> tuple[dict, 
             pending = child
     if pending:
         return pending, False
-    return api.create("/users/0/items", {
+    return api.create(f"{api.prefix}/items", {
         "itemType": "attachment", "parentItem": parent_key, "linkMode": "imported_file",
         "title": pdf.name, "filename": pdf.name, "contentType": "application/pdf",
         "tags": [], "collections": [], "relations": {},
@@ -368,7 +401,7 @@ def _attachment(api: _API, parent_key: str, pdf: Path, md5: str) -> tuple[dict, 
 
 
 def _upload(api: _API, attachment: dict, pdf: Path, md5: str) -> None:
-    endpoint = f"/users/0/items/{_key(attachment)}/file"
+    endpoint = f"{api.prefix}/items/{_key(attachment)}/file"
     previous = _data(attachment).get("md5")
     precondition = {"If-Match": f'"{previous}"'} if previous else {"If-None-Match": "*"}
     response = api.request("POST", endpoint, write=True, headers=precondition, data={
@@ -410,6 +443,20 @@ def _upload(api: _API, attachment: dict, pdf: Path, md5: str) -> None:
         raise ZoteroError("Zotero did not confirm registering the PDF; run again to retry")
 
 
+def library_info(config: Config) -> dict:
+    """Verify the configured library identity without authorization or mutations."""
+    try:
+        with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
+            api = _API(client, config, interactive=False)
+            return {"library": api.library_name or "My Library", "group_id": api.group_id}
+    except httpx.HTTPError:
+        raise ZoteroError(
+            "Could not verify the Zotero library; open Zotero and enable its local API"
+        ) from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ZoteroError("Zotero returned invalid library metadata") from None
+
+
 def save(
     article: Article, pdf: Path, config: Config, *, collection: str | None = None,
     interactive: bool = True,
@@ -431,25 +478,31 @@ def save(
             added = parent is None
             if added:
                 emit("zotero", "Adding bibliography entry to Zotero")
-                parent = api.create("/users/0/items", _bibliography(article, collection_key))
+                parent = api.create(f"{api.prefix}/items", _bibliography(article, collection_key))
             elif collection_key and collection_key not in _data(parent).get("collections", []):
                 current = _data(parent)
                 version = current.get("version", parent.get("version"))
                 if version is None:
                     raise ZoteroError("Zotero did not provide an item version; saving was stopped")
                 api.request(
-                    "PATCH", f"/users/0/items/{_key(parent)}", write=True,
+                    "PATCH", f"{api.prefix}/items/{_key(parent)}", write=True,
                     headers={"If-Unmodified-Since-Version": str(version)},
                     json={"collections": [*current.get("collections", []), collection_key]},
                 )
-            attachment, present = _attachment(api, _key(parent), pdf, md5)
+            attachment, present = _attachment(
+                api, _key(parent), pdf, md5,
+                reuse_existing_pdf=api.group_id is not None and not added,
+            )
             if not present:
                 _upload(api, attachment, pdf, md5)
-            return {
+            result = {
                 "status": "added" if added else ("already-present" if present else "attached"),
                 "item_key": _key(parent), "attachment_key": _key(attachment),
                 "collection": collection_name, "collection_key": collection_key,
             }
+            if api.group_id is not None:
+                result.update(group_id=api.group_id, library=api.library_name)
+            return result
     except httpx.HTTPError:
         raise ZoteroError(
             "Could not communicate with Zotero. Open Zotero and enable its local API; "

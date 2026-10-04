@@ -79,12 +79,20 @@ To save a retrieved paper and PDF to Zotero, opt in per command:
 
 ```bash
 papr REF --zotero
-papr REF --zotero --collection SBS
+papr REF --zotero --collection Inbox
 ```
 
-Set a personal default collection with `papr config set zotero.collection SBS`
-or `PAPR_ZOTERO_COLLECTION`. `SBS` is an example personal choice; the generated
-config leaves the collection unset (with `Inbox` shown as a commented example).
+Zotero groups and collections are different: the SBS group library is library
+ID `5593385`, while `Inbox` is an optional collection inside a selected
+library. Set the group library as your personal default with
+`papr config set zotero.group_id 5593385`. With a group selected, imports,
+searches, and resolution use that group. A collection can then be selected
+within it with `--collection` or `papr config set zotero.collection Inbox`;
+leave the collection unset to use the group library without a collection.
+Use `papr config set zotero.collection ''` to clear a previously configured
+collection. The generic personal default has no group ID and uses My Library.
+Papr does not create or fall back to another library if the configured group
+is unavailable. `PAPR_ZOTERO_COLLECTION` sets the optional collection name.
 Zotero 10 or later with its local API enabled is required. On the first
 interactive save, Zotero asks for native write permission; choose **Always
 Allow** to save authorization in a server-scoped file with owner-only access.
@@ -100,11 +108,17 @@ papr zotero add paper.pdf --dry-run
 papr zotero add paper.pdf --non-interactive --no-compress
 ```
 
-`--collection` overrides the personal default; `--dry-run` previews the import.
+`--collection` overrides the personal default; `--dry-run` previews the import
+and, for a group target, shows its ID and name using read-only library
+information. Zotero write authorization is server-wide. These details describe
+the configured targeting behavior; a live SBS group import has not been
+verified.
 An existing parent item is reused by DOI, or by exact title, year, and authors
 when a DOI match is unavailable. With incomplete metadata, an existing PDF must
 have identical contents to prove the match; ambiguous imports stop before writes.
-An already attached copy of the same PDF is skipped. PDFs are
+An already attached copy of the same PDF is skipped. In group libraries, an
+existing local PDF remains authoritative: papr reuses it even when a newly
+compressed copy has different bytes, rather than adding another attachment. PDFs are
 stored as copies by default, and a failed Zotero import leaves the downloaded
 PDF in place.
 
@@ -245,7 +259,8 @@ dpi = 200
 timeout = 120
 
 [zotero]
-collection = "SBS" # optional personal default; generated config comments out Inbox
+group_id = 5593385 # SBS shared group library; optional personal setting
+collection = "Inbox" # optional collection within the selected library
 ```
 
 For standalone compression, use `papr compress`:

@@ -111,12 +111,18 @@ def _api_get(client: httpx.Client, url: str, deadline: float, **kwargs) -> httpx
     return client.get(url, timeout=min(1.0, remaining), **kwargs)
 
 
+def _library_prefix(config: Config) -> str:
+    group_id = getattr(config, "zotero_group_id", None)
+    return f"/groups/{group_id}" if group_id is not None else "/users/0"
+
+
 def _api_attachment(
-    client: httpx.Client, base: str, item_key: str, deadline: float
+    client: httpx.Client, base: str, item_key: str, deadline: float,
+    *, prefix: str = "/users/0",
 ) -> str | None:
     r = _api_get(
         client,
-        f"{base}/users/0/items/{item_key}/children",
+        f"{base}{prefix}/items/{item_key}/children",
         deadline,
         params={"itemType": "attachment", "format": "json"},
     )
@@ -131,7 +137,7 @@ def _api_attachment(
         key = child.get("key") or data.get("key")
         if not key:
             continue
-        file_r = _api_get(client, f"{base}/users/0/items/{key}/file/view/url", deadline)
+        file_r = _api_get(client, f"{base}{prefix}/items/{key}/file/view/url", deadline)
         if file_r.status_code >= 400:
             continue
         path = _file_url_to_path(file_r.text)
@@ -144,13 +150,16 @@ def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
     base = config.zotero_api_url.rstrip("/")
     if not base:
         return []
+    prefix = _library_prefix(config)
     headers = {"Zotero-API-Version": "3"}
     deadline = time.monotonic() + API_BUDGET_SECONDS
-    emit("resolve", "Querying Zotero desktop API")
+    group_id = getattr(config, "zotero_group_id", None)
+    label = f"Zotero group {group_id}" if group_id is not None else "Zotero desktop"
+    emit("resolve", f"Querying {label} API")
     with httpx.Client(timeout=1.0, headers=headers) as client:
         r = _api_get(
             client,
-            f"{base}/users/0/items/top",
+            f"{base}{prefix}/items/top",
             deadline,
             params={
                 "q": query,
@@ -184,7 +193,7 @@ def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
                 continue
             emit("resolve", f"Checking Zotero PDF {index}/{len(candidates)}")
             try:
-                article.local_pdf = _api_attachment(client, base, key, deadline)
+                article.local_pdf = _api_attachment(client, base, key, deadline, prefix=prefix)
             except httpx.HTTPError:
                 # Keep useful metadata even when attachment requests are unavailable.
                 logger.debug("Zotero attachment lookup failed", exc_info=True)
@@ -233,14 +242,18 @@ def _snapshot(source: Path) -> sqlite3.Connection:
     return dst
 
 
-def _sqlite_articles(conn: sqlite3.Connection, data_dir: Path) -> list[tuple[int, Article]]:
+def _sqlite_articles(
+    conn: sqlite3.Connection, data_dir: Path, library_id: int | None = None,
+) -> list[tuple[int, Article]]:
+    library_filter = " and i.libraryID = ?" if library_id is not None else ""
     rows = conn.execute(
-        """
+        f"""
         select i.itemID, i.key, it.typeName
         from items i
         join itemTypes it on it.itemTypeID = i.itemTypeID
-        where it.typeName not in ('attachment', 'note', 'annotation')
-        """
+        where it.typeName not in ('attachment', 'note', 'annotation'){library_filter}
+        """,
+        (library_id,) if library_id is not None else (),
     ).fetchall()
     if not rows:
         return []
@@ -284,13 +297,16 @@ def _sqlite_articles(conn: sqlite3.Connection, data_dir: Path) -> list[tuple[int
                 "name": name,
             }
         )
+    attachment_filter = " and child.libraryID = ?" if library_id is not None else ""
     attachment_rows = conn.execute(
-        """
+        f"""
         select ia.parentItemID, child.key, ia.path, ia.contentType
         from itemAttachments ia
         join items child on child.itemID = ia.itemID
+        where ia.parentItemID in ({placeholders}){attachment_filter}
         order by ia.itemID
-        """
+        """,
+        [*item_ids, *([library_id] if library_id is not None else [])],
     ).fetchall()
     attachments: dict[int, str] = {}
     for attachment in attachment_rows:
@@ -357,6 +373,8 @@ def _sqlite_all(config: Config) -> list[Article]:
     if not data_dir:
         return []
 
+    group_id = getattr(config, "zotero_group_id", None)
+
     def load() -> list[Article]:
         emit("resolve", "Reading Zotero database snapshot")
         try:
@@ -367,12 +385,26 @@ def _sqlite_all(config: Config) -> list[Article]:
             # Cache this failure for the command too, rather than waiting again per paper.
             return []
         try:
-            emit("resolve", "Loading Zotero library metadata")
-            return [article for _, article in _sqlite_articles(conn, data_dir)]
+            library_id = None
+            if group_id is not None:
+                try:
+                    group = conn.execute(
+                        "select libraryID from groups where groupID = ?", (group_id,),
+                    ).fetchone()
+                except sqlite3.Error:
+                    group = None
+                if group is None or group["libraryID"] is None:
+                    emit("resolve", f"Zotero group {group_id} is absent from the local database")
+                    return []
+                library_id = group["libraryID"]
+                emit("resolve", f"Loading Zotero group {group_id} metadata")
+            else:
+                emit("resolve", "Loading Zotero library metadata")
+            return [article for _, article in _sqlite_articles(conn, data_dir, library_id)]
         finally:
             conn.close()
 
-    return cached_library(("zotero", str(data_dir.resolve())), load)
+    return cached_library(("zotero", str(data_dir.resolve()), group_id), load)
 
 
 def search_sqlite(query: str, config: Config) -> list[Article]:

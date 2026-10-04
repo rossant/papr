@@ -263,3 +263,115 @@ def test_zotero_api_attachment_budget_preserves_metadata(monkeypatch):
     assert len(results) == 5
     assert all(article.local_pdf is None for article in results)
     assert len(requested) == 2
+
+
+def _add_zotero_groups(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            alter table items add column libraryID integer default 1;
+            create table groups (groupID integer primary key, libraryID integer);
+            insert into groups values (5593385, 8);
+            insert into groups values (12345, 9);
+            """
+        )
+        for item_id, attachment_id, library_id, title in [
+            (3, 4, 8, "SBS Jenny paper"), (5, 6, 9, "Other Jenny paper"),
+        ]:
+            conn.execute(
+                "insert into items values (?, ?, 1, ?)",
+                (item_id, f"PARENT{library_id}", library_id),
+            )
+            conn.execute(
+                "insert into items values (?, ?, 2, ?)",
+                (attachment_id, f"ATTACH{library_id}", library_id),
+            )
+            conn.execute("insert into itemDataValues values (?, ?)", (item_id + 10, title))
+            conn.execute("insert into itemData values (?, 1, ?)", (item_id, item_id + 10))
+            for field_id in (2, 3, 4):
+                conn.execute("insert into itemData values (?, ?, ?)", (item_id, field_id, field_id))
+            conn.execute("insert into itemCreators values (?, 1, 1, 0)", (item_id,))
+            conn.execute(
+                "insert into itemAttachments values (?, ?, 'storage:paper.pdf', 'application/pdf')",
+                (attachment_id, item_id),
+            )
+
+
+def test_zotero_group_api_scopes_metadata_and_attachment_requests(tmp_path, monkeypatch):
+    pdf = tmp_path / "group-paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    requested = []
+
+    def get(self, url, **kwargs):
+        requested.append(url)
+        if url.endswith("/top"):
+            data = [{"key": "PARENT", "data": {"title": "Jenny paper", "date": "2006"}}]
+            return httpx.Response(200, json=data, request=httpx.Request("GET", url))
+        if url.endswith("/children"):
+            data = [{"key": "PDF", "data": {"itemType": "attachment", "filename": "paper.pdf"}}]
+            return httpx.Response(200, json=data, request=httpx.Request("GET", url))
+        return httpx.Response(200, text=pdf.as_uri(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    config = Config()
+    config.zotero_group_id = 5593385
+    results = zotero.search_api("Jenny paper", config)
+    assert len(results) == 1 and results[0].local_pdf == str(pdf)
+    base = f"{config.zotero_api_url}/groups/5593385/items"
+    assert requested == [f"{base}/top", f"{base}/PARENT/children", f"{base}/PDF/file/view/url"]
+
+
+def test_zotero_group_sqlite_is_scoped_and_read_only(tmp_path):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    _add_zotero_groups(path)
+    for key in ("ATTACH", "ATTACH8", "ATTACH9"):
+        storage = tmp_path / "storage" / key
+        storage.mkdir(parents=True)
+        (storage / "paper.pdf").write_bytes(b"%PDF-1.7\n")
+    original = path.read_bytes()
+    config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    config.zotero_group_id = 5593385
+    result = zotero.search_sqlite("Jenny 2006", config)
+    assert [article.title for article in result] == ["SBS Jenny paper"]
+    assert result[0].local_pdf == str(tmp_path / "storage" / "ATTACH8" / "paper.pdf")
+    assert zotero.by_doi("10.1000/JENNY", config).title == "SBS Jenny paper"
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("groups_exist", [False, True])
+def test_missing_zotero_group_never_reads_other_libraries(tmp_path, groups_exist):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    if groups_exist:
+        _add_zotero_groups(path)
+    config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    config.zotero_group_id = 999999
+    assert zotero.search_sqlite("Jenny 2006", config) == []
+    assert zotero.by_doi("10.1000/jenny", config) is None
+
+
+def test_zotero_session_caches_each_group_separately(tmp_path):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    _add_zotero_groups(path)
+    config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    with resolution_session():
+        config.zotero_group_id = 5593385
+        assert zotero.search_sqlite("Jenny 2006", config)[0].title == "SBS Jenny paper"
+        config.zotero_group_id = 12345
+        assert zotero.search_sqlite("Jenny 2006", config)[0].title == "Other Jenny paper"
+        config.zotero_group_id = None
+        assert len(zotero.search_sqlite("Jenny 2006", config)) == 3
+
+
+
+def test_zotero_group_without_library_mapping_does_not_read_all_records(tmp_path):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    _add_zotero_groups(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("insert into groups values (999999, null)")
+    config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    config.zotero_group_id = 999999
+    assert zotero.search_sqlite("Jenny 2006", config) == []

@@ -225,7 +225,8 @@ def _config_init(config: Config) -> int:
             "dpi = 200\n"
             "timeout = 120\n\n"
             "[zotero]\n"
-            '# collection = "Inbox"\n\n'
+            "# group_id = 1234567  # optional shared group library\n"
+            '# collection = "Inbox"  # optional collection within the selected library\n\n'
             "[local]\n"
             "enabled = true\n"
             'zotero_api_url = "http://127.0.0.1:23119/api"\n'
@@ -434,9 +435,10 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                 print(f"✓ {article.first_creator} {article.year or ''} — {joined}")
                 if row.get("zotero"):
                     saved = row["zotero"]
-                    print(
-                        f"✓ Zotero: {saved['status']} — {saved.get('collection') or 'My Library'}"
-                    )
+                    target = saved.get("library") or "My Library"
+                    if saved.get("collection"):
+                        target += f" / {saved['collection']}"
+                    print(f"✓ Zotero: {saved['status']} — {target}")
             row.update(
                 status="ok",
                 source=source,
@@ -621,7 +623,16 @@ def _run_zotero(args: argparse.Namespace, config: Config) -> int:
                 with pause():
                     print(f"Would save {_article_line(article)}")
                     print(f"  PDF: {pdf}")
-                    print(f"  Collection: {collection or 'My Library'}")
+                    if config.zotero_group_id is not None:
+                        from .zotero import library_info
+
+                        target = library_info(config)
+                        library = f"{target['library']} (group {target['group_id']})"
+                    else:
+                        library = "My Library"
+                    print(f"  Library: {library}")
+                    if collection:
+                        print(f"  Collection: {collection}")
                 status = "dry-run"
                 return 0
             prepared, _ = compress_pdf(pdf, config, enabled=False if args.no_compress else None)
@@ -635,7 +646,9 @@ def _run_zotero(args: argparse.Namespace, config: Config) -> int:
                 )
             with pause():
                 print(f"✓ Zotero: {result['status']} — {article.title}")
-                print(f"  Collection: {result.get('collection') or 'My Library'}")
+                print(f"  Library: {result.get('library') or 'My Library'}")
+                if result.get("collection"):
+                    print(f"  Collection: {result['collection']}")
             status = "ok"
             return 0
         except Exception as exc:

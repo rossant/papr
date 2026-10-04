@@ -36,13 +36,20 @@ def _zotero_status(config: Config) -> SourceStatus:
     if base:
         try:
             with httpx.Client(timeout=0.6, headers={"Zotero-API-Version": "3"}) as client:
+                prefix = (
+                    f"/groups/{config.zotero_group_id}"
+                    if config.zotero_group_id is not None
+                    else "/users/0"
+                )
                 r = client.get(
-                    f"{base}/users/0/items/top",
+                    f"{base}{prefix}/items/top",
                     params={"format": "keys", "limit": 1},
                 )
                 if r.status_code == 200:
                     count = r.headers.get("Total-Results")
                     detail = "local API"
+                    if config.zotero_group_id is not None:
+                        detail += f", group {config.zotero_group_id}"
                     if count:
                         detail += f", {count} top-level items"
                     return SourceStatus("zotero", True, detail)

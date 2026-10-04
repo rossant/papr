@@ -239,3 +239,28 @@ def test_compress_corrupt_pdf_errors_without_creating_output(config, tmp_path):
     assert cli.main(["compress", "-i", str(pdf), "--quiet"]) == 1
     assert pdf.read_bytes() == b"not a pdf"
     assert not pdf.with_name("broken.compressed.pdf").exists()
+
+
+def test_group_dry_run_checks_library_identity_without_saving(
+    config, tmp_path, monkeypatch, capsys
+):
+    pdf = make_pdf(tmp_path / "download.pdf")
+    history.record_download(Article("Paper"), pdf, config)
+    config.zotero_group_id = 5593385
+    config.zotero_collection = None
+    inspected = []
+
+    def info(cfg):
+        inspected.append(cfg.zotero_group_id)
+        return {"library": "SBS", "group_id": 5593385}
+
+    monkeypatch.setattr(zotero, "library_info", info)
+    monkeypatch.setattr(zotero, "save", lambda *a, **k: pytest.fail("must not save"))
+    monkeypatch.setattr(
+        compression, "compress_pdf", lambda *a, **k: pytest.fail("must not compress")
+    )
+    assert cli.main(["zotero", "last", "--dry-run", "--quiet"]) == 0
+    output = capsys.readouterr().out
+    assert "Library: SBS (group 5593385)" in output
+    assert "Collection:" not in output
+    assert inspected == [5593385]

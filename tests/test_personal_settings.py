@@ -46,7 +46,6 @@ def test_setting_preserves_other_sections(settings, text):
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("zotero.collection", ""),
         ("pdf.dpi", "0"),
         ("pdf.timeout", "abc"),
         ("pdf.compress", "maybe"),
@@ -86,3 +85,19 @@ def test_config_set_command(settings, monkeypatch, capsys):
 def test_invalid_pdf_or_zotero_config(kwargs):
     with pytest.raises(ValueError):
         Config(**kwargs)
+
+
+def test_group_library_setting_and_clear_collection(settings):
+    settings.write_text('[zotero]\ncollection = "SBS"\n')
+    set_setting(Config.load(settings), "zotero.group_id", "5593385")
+    set_setting(Config.load(settings), "zotero.collection", "")
+    config = Config.load(settings)
+    assert config.zotero_group_id == 5593385
+    assert config.zotero_collection is None
+    assert "collection =" not in settings.read_text()
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, "5593385", 1.5])
+def test_invalid_group_id_is_rejected(value):
+    with pytest.raises(ValueError, match="zotero.group_id must be a positive integer"):
+        Config(zotero_group_id=value)
