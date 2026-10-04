@@ -75,6 +75,39 @@ Settings → Advanced → Allow other applications on this computer to communica
 
 Read access needs no Zotero API key.
 
+To save a retrieved paper and PDF to Zotero, opt in per command:
+
+```bash
+papr REF --zotero
+papr REF --zotero --collection SBS
+```
+
+Set a personal default collection with `papr config set zotero.collection SBS`
+or `PAPR_ZOTERO_COLLECTION`. `SBS` is an example personal choice; the generated
+config leaves the collection unset (with `Inbox` shown as a commented example).
+Zotero 10 or later with its local API enabled is required. On the first
+interactive save, Zotero asks for native write permission; choose **Always
+Allow** to save authorization in a server-scoped file with owner-only access.
+Use `--non-interactive` to avoid that prompt.
+
+`papr zotero last` (also `papr zotero`) imports the exact PDF and metadata from
+the latest successful recorded download. It does not guess from file
+modification times in Downloads. Import an existing PDF with:
+
+```bash
+papr zotero add paper.pdf
+papr zotero add paper.pdf --dry-run
+papr zotero add paper.pdf --non-interactive --no-compress
+```
+
+`--collection` overrides the personal default; `--dry-run` previews the import.
+An existing parent item is reused by DOI, or by exact title, year, and authors
+when a DOI match is unavailable. With incomplete metadata, an existing PDF must
+have identical contents to prove the match; ambiguous imports stop before writes.
+An already attached copy of the same PDF is skipped. PDFs are
+stored as copies by default, and a failed Zotero import leaves the downloaded
+PDF in place.
+
 If the local API is unavailable, `papr` can fall back to a read-only SQLite
 snapshot. Standard data directories are detected automatically:
 
@@ -190,6 +223,51 @@ The acquisition order is:
 Downloaded PDFs are validated and cached under the platform cache directory.
 Use `--refresh` to ignore the cache and `--oa-only` to prohibit institutional
 fallback.
+
+## PDF compression
+
+PDF compression is enabled by default when exporting PDFs or saving them to
+Zotero. Ghostscript targets 200 dpi for color and grayscale images and 600 dpi
+for monochrome images. Only smaller, validated results are used; cached
+optimized copies leave source PDFs untouched, and native extraction and OCR
+continue to use the original. If Ghostscript is unavailable, papr tries
+lossless compression with qpdf or pypdf. Encrypted or signed PDFs are kept
+unchanged; forms and annotations use lossless compression.
+
+Disable compression for one command with `--no-compress`, or set
+`papr config set pdf.compress false`. Configure compression in your personal
+config:
+
+```toml
+[pdf]
+compress = true
+dpi = 200
+timeout = 120
+
+[zotero]
+collection = "SBS" # optional personal default; generated config comments out Inbox
+```
+
+For standalone compression, use `papr compress`:
+
+```bash
+papr compress paper.pdf
+papr compress paper1.pdf paper2.pdf -o compressed/
+papr compress -i paper.pdf
+papr compress paper.pdf --dpi 150 --overwrite
+```
+
+When compression reduces the file size, the default output is
+`paper.compressed.pdf` beside the source. Otherwise, the original stays unchanged.
+`-o` selects an output directory; `-i` / `--in-place` explicitly replaces the source, and
+`--overwrite` allows replacing an existing destination. `--dpi` overrides the
+image resolution. Multiple files are processed independently, with failures
+reported while the batch continues; each result reports the size saved.
+
+Ghostscript and qpdf are optional external commands (for example,
+`brew install ghostscript`). Without them, pypdf provides a lossless fallback.
+Compression status and size details are included in JSON batch reports; Zotero
+import results are also included in those reports.
 
 ## UCL / EZproxy
 
@@ -343,6 +421,7 @@ MISTRAL_API_KEY
 MISTRAL_API_KEY_FILE
 PAPR_ZOTERO_API_URL
 PAPR_ZOTERO_DATA_DIR
+PAPR_ZOTERO_COLLECTION
 PAPR_ZOLIT_REPO
 PAPR_ZOLIT_DB
 PAPR_ZOLIT_SBS_REPO
