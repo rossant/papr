@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +43,10 @@ class Config:
     zolit_repo: Path | None = None
     zolit_db: Path | None = None
     zolit_sbs_repo: Path | None = None
+    zotero_collection: str | None = None
+    pdf_compress: bool = True
+    pdf_compression_dpi: int = 200
+    pdf_compression_timeout: int = 120
 
     def __post_init__(self) -> None:
         if not isinstance(self.formats, list) or not self.formats:
@@ -58,24 +65,38 @@ class Config:
             invalid = isinstance(value, bool) or not isinstance(value, (int, float))
             if invalid or not 0 <= value <= 1:
                 raise ValueError(f"matching.{name} must be a number between 0 and 1")
-        for name in ("max_candidates", "filename_max_length"):
+        for name in (
+            "max_candidates",
+            "filename_max_length",
+            "pdf_compression_dpi",
+            "pdf_compression_timeout",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                key = (
-                    "matching.max_candidates" if name == "max_candidates" else "filename.max_length"
-                )
+                key = {
+                    "max_candidates": "matching.max_candidates",
+                    "filename_max_length": "filename.max_length",
+                    "pdf_compression_dpi": "pdf.dpi",
+                    "pdf_compression_timeout": "pdf.timeout",
+                }[name]
                 raise ValueError(f"{key} must be a positive integer")
         string_fields = ("filename_template", "filename_space", "mistral_model", "zotero_api_url")
         for name in string_fields:
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
-        for name in ("email", "unpaywall_email", "openalex_api_key"):
+        for name in ("email", "unpaywall_email", "openalex_api_key", "zotero_collection"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
-        for name in ("filename_ascii", "local_sources"):
+        if self.zotero_collection is not None and not self.zotero_collection.strip():
+            raise ValueError("zotero.collection must be a non-empty string")
+        for name in ("filename_ascii", "local_sources", "pdf_compress"):
             if type(getattr(self, name)) is not bool:
-                key = "filename.ascii" if name == "filename_ascii" else "local.enabled"
+                key = {
+                    "filename_ascii": "filename.ascii",
+                    "local_sources": "local.enabled",
+                    "pdf_compress": "pdf.compress",
+                }[name]
                 raise ValueError(f"{key} must be true or false")
         for name in ("download_dir", "zotero_data_dir", "zolit_repo", "zolit_db", "zolit_sbs_repo"):
             value = getattr(self, name)
@@ -133,6 +154,8 @@ class Config:
             md = table("md", processors)
             matching = table("matching")
             local = table("local")
+            zotero = table("zotero")
+            pdf = table("pdf")
             if "download_dir" in data:
                 cfg.download_dir = _config_path(data["download_dir"], "download_dir")
             if "formats" in data:
@@ -150,6 +173,10 @@ class Config:
             cfg.auto_accept_margin = matching.get("auto_accept_margin", cfg.auto_accept_margin)
             cfg.max_candidates = matching.get("max_candidates", cfg.max_candidates)
             cfg.local_sources = local.get("enabled", cfg.local_sources)
+            cfg.zotero_collection = zotero.get("collection", cfg.zotero_collection)
+            cfg.pdf_compress = pdf.get("compress", cfg.pdf_compress)
+            cfg.pdf_compression_dpi = pdf.get("dpi", cfg.pdf_compression_dpi)
+            cfg.pdf_compression_timeout = pdf.get("timeout", cfg.pdf_compression_timeout)
             cfg.zotero_api_url = local.get("zotero_api_url", cfg.zotero_api_url)
             cfg.zotero_data_dir = _path(local.get("zotero_data_dir"), "local.zotero_data_dir")
             cfg.zolit_repo = _path(local.get("zolit_repo"), "local.zolit_repo")
@@ -167,6 +194,7 @@ class Config:
         cfg.zolit_sbs_repo = (
             _path(os.getenv("PAPR_ZOLIT_SBS_REPO"), "PAPR_ZOLIT_SBS_REPO") or cfg.zolit_sbs_repo
         )
+        cfg.zotero_collection = os.getenv("PAPR_ZOTERO_COLLECTION", cfg.zotero_collection)
         cfg.__post_init__()
         return cfg
 
@@ -175,3 +203,72 @@ def _config_path(value: object, key: str) -> Path:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a path string")
     return Path(value).expanduser()
+
+
+def set_setting(config: Config, key: str, raw_value: str) -> Path:
+    """Update a supported personal setting while preserving unrelated configuration."""
+    fields = {
+        "zotero.collection": ("zotero_collection", str),
+        "pdf.compress": ("pdf_compress", bool),
+        "pdf.dpi": ("pdf_compression_dpi", int),
+        "pdf.timeout": ("pdf_compression_timeout", int),
+    }
+    if key not in fields:
+        raise ValueError(f"Unsupported setting {key!r}; choose {', '.join(fields)}")
+    attribute, kind = fields[key]
+    if kind is bool:
+        if raw_value.lower() not in {"true", "false"}:
+            raise ValueError(f"{key} must be true or false")
+        value = raw_value.lower() == "true"
+    elif kind is int:
+        try:
+            value = int(raw_value)
+        except ValueError:
+            raise ValueError(f"{key} must be a positive integer") from None
+    else:
+        value = raw_value
+    from dataclasses import replace
+
+    replace(config, **{attribute: value})  # Validate before touching the existing file.
+    path = config.config_dir / "config.toml"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    data = tomllib.loads(text)
+    table, field = key.split(".", 1)
+    literal = json.dumps(value, ensure_ascii=False)
+    headers = list(re.finditer(r"(?m)^[ \t]*\[[^\n]+\][ \t]*(?:#.*)?$", text))
+    target = next(
+        (h for h in headers if re.match(rf"^[ \t]*\[[ \t]*{re.escape(table)}[ \t]*\]", h.group())),
+        None,
+    )
+    if table in data and not isinstance(data[table], dict):
+        raise ValueError(f"{table} must be a TOML table")
+    assignment = f"{field} = {literal}\n"
+    if target is None:
+        if table in data:
+            raise ValueError(f"Edit {path} to change the inline {table} table")
+        text = text.rstrip() + f"\n\n[{table}]\n" + assignment
+    else:
+        end = next((h.start() for h in headers if h.start() > target.start()), len(text))
+        block = text[target.end() : end]
+        pattern = re.compile(rf"(?m)^[ \t]*{re.escape(field)}[ \t]*=.*$")
+        if pattern.search(block):
+            block = pattern.sub(lambda _: assignment.rstrip(), block)
+        else:
+            block = block.rstrip() + "\n" + assignment + "\n"
+        text = text[: target.end()] + block + text[end:]
+    parsed = tomllib.loads(text)
+    if parsed[table][field] != value:
+        raise ValueError(f"Could not update {key}; edit {path} manually")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text.lstrip("\n"))
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path

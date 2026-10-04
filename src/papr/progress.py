@@ -17,7 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 _current: ContextVar[Reporter | None] = ContextVar("papr_reporter", default=None)
-STAGES = ("resolve", "fetch", "process", "export")
+STAGES = ("resolve", "fetch", "compress", "process", "export", "zotero")
 
 
 def emit(

@@ -48,6 +48,7 @@ def export_outputs(
     filename_template: str | None = None,
     processor: str | None = None,
     overwrite: bool = False,
+    pdf_output: Path | None = None,
 ) -> tuple[list[Path], str | None]:
     output_dir.mkdir(parents=True, exist_ok=True)
     base = basename(article, config, filename_template)
@@ -57,8 +58,9 @@ def export_outputs(
     if "pdf" in formats:
         dest = collision_safe_path(output_dir / f"{base}.pdf", overwrite=overwrite)
         emit("export", f"Saving {dest.name}")
-        if pdf.resolve() != dest.resolve():
-            shutil.copy2(pdf, dest)
+        source_pdf = pdf_output if pdf_output is not None else pdf
+        if source_pdf.resolve() != dest.resolve():
+            shutil.copy2(source_pdf, dest)
         outputs.append(dest)
     if "md" in formats:
         text, processor_used = _cached_markdown(pdf, config, processor)
