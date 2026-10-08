@@ -127,15 +127,13 @@ def _sources(config: Config) -> list[dict[str, str]]:
 def diagnose(config: Config, *, strict: bool = False, tool_timeout: float = 2.0) -> dict:
     """Collect diagnostics without creating files or contacting remote services."""
     checks = [_installation()]
-    for label, path, required in (
-        ("output directory", config.download_dir, True),
-        ("config directory", config.config_dir, True),
-        ("data directory", config.data_dir, False),
-        ("cache directory", config.cache_dir, False),
+    for label, path in (
+        ("output directory", config.download_dir),
+        ("config directory", config.config_dir),
+        ("data directory", config.data_dir),
+        ("cache directory", config.cache_dir),
     ):
         status, detail = _directory_status(path)
-        if not required and status == "error":
-            status = "warning"
         checks.append(_check(label, status, detail))
 
     checks.extend(

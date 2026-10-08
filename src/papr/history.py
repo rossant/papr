@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
-from dataclasses import fields
 from pathlib import Path
 
 from .artifacts import atomic_copy, atomic_json, locate, remember
 from .config import Config
-from .model import Article, Person
+from .locking import state_lock
+from .model import Article
+from .model import article_from_dict as _article
 
 _HISTORY_NAME = "latest-download.json"
 
@@ -31,51 +31,16 @@ def _pdf_hash(pdf: Path) -> str:
 
 def record_download(article: Article, pdf: Path, config: Config) -> None:
     """Record only a successful PDF export, as selected by the caller."""
-    pdf = pdf.expanduser().resolve()
-    payload = {
-        "version": 1,
-        "pdf": str(pdf),
-        "sha256": _pdf_hash(pdf),
-        "article": article.to_dict(),
-    }
-    remember(pdf, config)
-    atomic_json(config.data_dir / _HISTORY_NAME, payload)
-
-
-def _article(data: object) -> Article:
-    if not isinstance(data, dict) or not isinstance(data.get("title"), str):
-        raise ValueError("invalid article metadata")
-    names = {field.name for field in fields(Article)}
-    if set(data) - names:
-        raise ValueError("unknown article fields")
-    authors = data.get("authors", [])
-    if not isinstance(authors, list):
-        raise ValueError("invalid authors")
-    people = []
-    for person in authors:
-        if not isinstance(person, dict) or set(person) - {"family", "given", "orcid"}:
-            raise ValueError("invalid author metadata")
-        if any(not isinstance(person.get(key, ""), str) for key in ("family", "given")):
-            raise ValueError("invalid author name")
-        if person.get("orcid") is not None and not isinstance(person["orcid"], str):
-            raise ValueError("invalid author identifier")
-        people.append(Person(**person))
-    for name, value in data.items():
-        if name in {"authors", "year", "score"}:
-            continue
-        if value is not None and not isinstance(value, str):
-            raise ValueError("invalid article field")
-    year = data.get("year")
-    if year is not None and (isinstance(year, bool) or not isinstance(year, int)):
-        raise ValueError("invalid article year")
-    score = data.get("score")
-    if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))):
-        raise ValueError("invalid article score")
-    if score is not None and not math.isfinite(score):
-        raise ValueError("invalid article score")
-    values = dict(data)
-    values["authors"] = people
-    return Article(**values)
+    with state_lock(config):
+        pdf = pdf.expanduser().resolve()
+        payload = {
+            "version": 1,
+            "pdf": str(pdf),
+            "sha256": _pdf_hash(pdf),
+            "article": article.to_dict(),
+        }
+        remember(pdf, config)
+        atomic_json(config.data_dir / _HISTORY_NAME, payload)
 
 
 def load_latest(config: Config) -> tuple[Article, Path]:

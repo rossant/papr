@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import fields
 from pathlib import Path
 
 from .config import Config
 from .formats import bib, csl
 from .local import article_from_pdf
-from .model import Article, Person
+from .model import Article, article_from_dict
 from .selection import select_candidate
 
 
@@ -40,18 +39,7 @@ def _decode_json(item: dict) -> Article:
     native_keys = {"authors", "year", "journal", "doi", "pmid", "item_type", "local_pdf"}
     if not native_keys.intersection(item):
         return csl.decode(item)
-    values = {field.name: item[field.name] for field in fields(Article) if field.name in item}
-    authors = values.get("authors", [])
-    if not isinstance(authors, list) or not all(isinstance(author, dict) for author in authors):
-        raise ValueError("Native JSON authors must be a list of person objects")
-    person_fields = {field.name for field in fields(Person)}
-    values["authors"] = [
-        Person(**{key: value for key, value in author.items() if key in person_fields})
-        for author in authors
-    ]
-    if not isinstance(values.get("title"), str):
-        raise ValueError("Native JSON article requires a title string")
-    return Article(**values)
+    return article_from_dict(item, strict=False)
 
 
 def materialize_article(

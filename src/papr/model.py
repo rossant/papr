@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+import math
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 
@@ -77,3 +78,48 @@ class Article:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def article_from_dict(data: object, *, strict: bool = True) -> Article:
+    if not isinstance(data, dict) or not isinstance(data.get("title"), str):
+        raise ValueError("invalid article metadata")
+    names = {field.name for field in fields(Article)}
+    if strict and set(data) - names:
+        raise ValueError("unknown article fields")
+    data = {name: value for name, value in data.items() if name in names}
+    authors = data.get("authors", [])
+    if not isinstance(authors, list):
+        raise ValueError("invalid authors")
+    people = []
+    for person in authors:
+        if not isinstance(person, dict) or (strict and set(person) - {"family", "given", "orcid"}):
+            raise ValueError("invalid author metadata")
+        if any(not isinstance(person.get(key, ""), str) for key in ("family", "given")):
+            raise ValueError("invalid author name")
+        if person.get("orcid") is not None and not isinstance(person["orcid"], str):
+            raise ValueError("invalid author identifier")
+        people.append(
+            Person(
+                **{
+                    key: value
+                    for key, value in person.items()
+                    if key in {"family", "given", "orcid"}
+                }
+            )
+        )
+    for name, value in data.items():
+        if name in {"authors", "year", "score"}:
+            continue
+        if value is not None and not isinstance(value, str):
+            raise ValueError("invalid article field")
+    year = data.get("year")
+    if year is not None and (isinstance(year, bool) or not isinstance(year, int)):
+        raise ValueError("invalid article year")
+    score = data.get("score")
+    if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))):
+        raise ValueError("invalid article score")
+    if score is not None and not math.isfinite(score):
+        raise ValueError("invalid article score")
+    values = dict(data)
+    values["authors"] = people
+    return Article(**values)

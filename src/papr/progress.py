@@ -66,6 +66,7 @@ class Reporter:
         self.total = 0
         self.completed = 0
         self.succeeded = 0
+        self.excluded = 0
         self.durations: list[float] = []
         self.label = ""
         self.stage: str | None = None
@@ -151,7 +152,8 @@ class Reporter:
         if status == "error" and self.stage:
             result["failed_stage"] = self.stage
         self.completed += 1
-        self.succeeded += status != "error"
+        self.succeeded += status in {"ok", "dry-run"}
+        self.excluded += status == "excluded"
         self.durations.append(elapsed)
         self.item_started = None
         self.stage = None
@@ -231,8 +233,9 @@ class Reporter:
             self.display.stop()
             self.display = None
         succeeded = self.succeeded
+        exclusions = f", {self.excluded} excluded" if self.excluded else ""
         self.console.print(
-            f"Done: {succeeded} succeeded, {failures} failed · "
+            f"Done: {succeeded} succeeded, {failures} failed{exclusions} · "
             f"{self.cache_hits} cache hit(s) · {_duration(time.monotonic() - self.started)}"
         )
         self.console.print(f"Output: {output_dir}")

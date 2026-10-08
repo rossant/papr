@@ -238,3 +238,51 @@ def test_pdf_reads_doi_from_metadata(tmp_path, monkeypatch):
     found = Article("Paper", doi="10.1000/example")
     monkeypatch.setattr(local, "resolve", lambda *args, **kwargs: [found])
     assert local.article_from_pdf(pdf, Config()) is found
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("year", True),
+        ("year", "2024"),
+        ("score", float("nan")),
+        ("score", float("inf")),
+        ("authors", [42]),
+        ("authors", [{"family": 42}]),
+        ("source_key", 42),
+        ("source_library", []),
+    ],
+)
+def test_native_input_rejects_invalid_metadata_like_history(tmp_path, field, value):
+    from papr.history import _article
+
+    data = Article("Paper", year=2024).to_dict()
+    data[field] = value
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        input.load_input(str(path), Config())
+    with pytest.raises(ValueError):
+        _article(data)
+
+
+def test_native_input_allows_extension_fields_but_private_history_is_strict(tmp_path):
+    from papr.history import _article
+
+    data = {"title": "Paper", "year": 2024, "custom": "external annotation"}
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(data))
+    assert input.load_input(str(path), Config()) == [Article("Paper", year=2024)]
+    with pytest.raises(ValueError, match="unknown article fields"):
+        _article(data)
+
+
+def test_doctor_invalid_config_still_produces_json(monkeypatch, capsys):
+    def invalid():
+        raise ValueError("formats contains unsupported format")
+
+    monkeypatch.setattr(Config, "load", invalid)
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "error"
+    assert report["checks"][0]["name"] == "configuration"

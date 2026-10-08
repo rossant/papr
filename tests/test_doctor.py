@@ -89,6 +89,8 @@ def test_inaccessible_output_and_config_are_required_errors(config, monkeypatch)
     required = {check["name"]: check for check in report["checks"]}
     assert required["output directory"]["status"] == "error"
     assert required["config directory"]["status"] == "error"
+    assert required["data directory"]["status"] == "error"
+    assert required["cache directory"]["status"] == "error"
     assert not config.download_dir.exists()
 
 

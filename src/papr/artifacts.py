@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from .config import Config
+from .locking import state_lock
 
 
 def checksum(path: Path) -> str:
@@ -62,23 +63,31 @@ def cache_path(digest: str, config: Config) -> Path:
 
 
 def remember(path: Path, config: Config) -> dict:
-    path = path.expanduser().resolve()
-    digest = checksum(path)
-    cached = cache_path(digest, config)
-    if not cached.is_file() or checksum(cached) != digest:
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=cached.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-            shutil.copyfile(path, temporary)
-            if checksum(temporary) != digest:
-                raise ValueError(f"Artifact changed while caching: {path}")
-            temporary.replace(cached)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-    return {"path": str(path), "name": path.name, "sha256": digest, "bytes": path.stat().st_size}
+    with state_lock(config):
+        path = path.expanduser().resolve()
+        digest = checksum(path)
+        cached = cache_path(digest, config)
+        if not cached.is_file() or checksum(cached) != digest:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=cached.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                shutil.copyfile(path, temporary)
+                if checksum(temporary) != digest:
+                    raise ValueError(f"Artifact changed while caching: {path}")
+                temporary.replace(cached)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        # Reuse starts a new grace period before an export publishes its manifest.
+        os.utime(cached, None, follow_symlinks=False)
+        return {
+            "path": str(path),
+            "name": path.name,
+            "sha256": digest,
+            "bytes": path.stat().st_size,
+        }
 
 
 def locate(path: Path, digest: str, config: Config) -> Path:

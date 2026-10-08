@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from .artifacts import locate
 from .batch_catalog import list_manifests, manifest_summary, resolve_manifest
 from .batches import export_batch, load_manifest, save_manifest
 from .config import Config
+from .locking import state_lock
 
 
 def run(argv: list[str], config: Config) -> int:
@@ -84,31 +86,32 @@ def run(argv: list[str], config: Config) -> int:
             if output is None and args.action == "resume":
                 output = _resume_output(data, config)
             output = output or config.download_dir
-            rows = export_batch(
-                manifest_path,
-                output,
-                config,
-                exclude=[resolve_manifest(value, config) for value in args.exclude_delivered],
-                overwrite=args.overwrite,
-                dry_run=args.dry_run,
-                resume=args.action == "resume",
-            )
-            for row in rows:
-                if row["status"] == "error":
-                    print(f"✗ {row.get('error', 'Export failed')}", file=sys.stderr)
-                if row["status"] == "excluded":
-                    print(f"− {row['article']['title']} — already delivered")
-                for path in row.get("outputs", []) if row["status"] != "excluded" else []:
-                    print(f"✓ {path}")
-            if not args.dry_run:
-                saved_manifest = save_manifest(
-                    rows,
+            with nullcontext() if args.dry_run else state_lock(config):
+                rows = export_batch(
+                    manifest_path,
+                    output,
                     config,
-                    args.new_manifest,
-                    name=args.name or data.get("name"),
-                    output_dir=output,
+                    exclude=[resolve_manifest(value, config) for value in args.exclude_delivered],
+                    overwrite=args.overwrite,
+                    dry_run=args.dry_run,
+                    resume=args.action == "resume",
                 )
-                print(f"Batch manifest: {saved_manifest}")
+                for row in rows:
+                    if row["status"] == "error":
+                        print(f"✗ {row.get('error', 'Export failed')}", file=sys.stderr)
+                    if row["status"] == "excluded":
+                        print(f"− {row['article']['title']} — already delivered")
+                    for path in row.get("outputs", []) if row["status"] != "excluded" else []:
+                        print(f"✓ {path}")
+                if not args.dry_run:
+                    saved_manifest = save_manifest(
+                        rows,
+                        config,
+                        args.new_manifest,
+                        name=args.name or data.get("name"),
+                        output_dir=output,
+                    )
+                    print(f"Batch manifest: {saved_manifest}")
             return 1 if any(row["status"] == "error" for row in rows) else 0
         return 0
     except (ValueError, OSError, KeyError) as exc:

@@ -134,7 +134,8 @@ def _get_parser() -> argparse.ArgumentParser:
         prog="papr",
         description="Fetch and convert scholarly papers.",
         epilog=(
-            "Commands: resolve, batch, compress, zotero, config, sources. Use papr COMMAND --help."
+            "Commands: resolve, batch, cache, doctor, compress, zotero, config, sources. "
+            "Use papr COMMAND --help."
         ),
     )
     p.add_argument(
@@ -169,6 +170,7 @@ def _get_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--report", type=Path, help="write a JSON batch report")
     p.add_argument("--manifest", type=Path, help="save the persistent batch manifest at this path")
+    p.add_argument("--batch-name", help="name this batch for later lookup")
     p.add_argument(
         "--exclude-delivered",
         type=Path,
@@ -267,8 +269,19 @@ def _config_init(config: Config) -> int:
 
 
 def _run_get(args: argparse.Namespace, config: Config) -> int:
+    from .locking import state_lock
+
     with Reporter(enabled=not args.quiet) as reporter:
-        return _run_get_reported(args, config, reporter)
+        try:
+            if args.dry_run:
+                return _run_get_reported(args, config, reporter)
+            # Keep new objects protected until the final manifest is registered,
+            # including when prune explicitly disables its usual age grace.
+            with state_lock(config):
+                return _run_get_reported(args, config, reporter)
+        except OSError as exc:
+            print(f"✗ Export: {exc}", file=sys.stderr)
+            return 1
 
 
 def _input_values(values: list[str]) -> list[str]:
@@ -307,8 +320,12 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
     use_local = not args.no_local
     use_remote = not args.local_only
     try:
-        excluded = delivered_identities(args.exclude_delivered)
-    except ValueError as exc:
+        from .batch_catalog import resolve_manifest
+
+        excluded = delivered_identities(
+            [resolve_manifest(str(value), config) for value in args.exclude_delivered]
+        )
+    except (ValueError, OSError) as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 1
     report: list[dict] = []
@@ -520,9 +537,11 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
         except (OSError, ValueError) as exc:
             print(f"✗ Cannot save batch report: {exc}", file=sys.stderr)
             failures += 1
-    if not args.dry_run or args.manifest:
+    if not args.dry_run or args.manifest or args.batch_name:
         try:
-            manifest = save_manifest(report, config, args.manifest)
+            manifest = save_manifest(
+                report, config, args.manifest, name=args.batch_name, output_dir=output_dir
+            )
             if not args.quiet:
                 print(f"Batch manifest: {manifest}", file=sys.stderr)
         except (OSError, ValueError) as exc:
@@ -532,92 +551,15 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
 
 
 def _zotero_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="papr zotero", description="Save papers to Zotero.")
-    parser.add_argument("action", nargs="?", default="last", choices=["add", "last"])
-    parser.add_argument("pdf", nargs="?", type=Path, help="PDF to import (for add)")
-    parser.add_argument("--collection", help="override your personal default collection")
-    parser.add_argument("--no-compress", action="store_true", help="import the original PDF")
-    parser.add_argument(
-        "--non-interactive", action="store_true", help="do not ask for authorization"
-    )
-    parser.add_argument("--dry-run", action="store_true", help="preview without changing Zotero")
-    _add_source_flags(parser)
-    return parser
+    from .zotero_cli import parser
+
+    return parser(_add_source_flags)
 
 
 def _run_zotero(args: argparse.Namespace, config: Config) -> int:
-    from .compression import compress_pdf
-    from .history import load_latest
-    from .zotero import save
+    from .zotero_cli import run
 
-    if args.action == "add" and args.pdf is None:
-        print("✗ Specify a PDF: papr zotero add paper.pdf", file=sys.stderr)
-        return 1
-    if args.action == "last" and args.pdf is not None:
-        print("✗ papr zotero last takes no PDF path", file=sys.stderr)
-        return 1
-    interactive = not args.non_interactive and sys.stdin.isatty()
-    with Reporter(enabled=not args.quiet) as reporter:
-        reporter.start_batch(1)
-        reporter.start_item("Latest downloaded paper" if args.action == "last" else str(args.pdf))
-        status = "error"
-        try:
-            emit("resolve", "Loading latest download" if args.action == "last" else "Reading PDF")
-            if args.action == "last":
-                article, pdf = load_latest(config)
-            else:
-                pdf = args.pdf.expanduser().resolve()
-                if not pdf.is_file() or pdf.suffix.lower() != ".pdf":
-                    raise ValueError(f"PDF not found: {pdf}")
-                article, _ = _resolve_item(
-                    pdf,
-                    config,
-                    interactive,
-                    use_local=not args.no_local,
-                    use_remote=not args.local_only,
-                    **({"enrich": True} if args.enrich else {}),
-                )
-            reporter.label = _article_line(article)
-            collection = args.collection or config.zotero_collection
-            if args.dry_run:
-                with pause():
-                    print(f"Would save {_article_line(article)}")
-                    print(f"  PDF: {pdf}")
-                    if config.zotero_group_id is not None:
-                        from .zotero import library_info
-
-                        target = library_info(config)
-                        library = f"{target['library']} (group {target['group_id']})"
-                    else:
-                        library = "My Library"
-                    print(f"  Library: {library}")
-                    if collection:
-                        print(f"  Collection: {collection}")
-                status = "dry-run"
-                return 0
-            prepared, _ = compress_pdf(pdf, config, enabled=False if args.no_compress else None)
-            with tempfile.TemporaryDirectory(prefix="papr-zotero-") as directory:
-                upload_pdf = prepared
-                if prepared.name != pdf.name:
-                    upload_pdf = Path(directory) / pdf.name
-                    shutil.copy2(prepared, upload_pdf)
-                result = save(
-                    article, upload_pdf, config, collection=collection, interactive=interactive
-                )
-            with pause():
-                print(f"✓ Zotero: {result['status']} — {article.title}")
-                print(f"  Library: {result.get('library') or 'My Library'}")
-                if result.get("collection"):
-                    print(f"  Collection: {result['collection']}")
-            status = "ok"
-            return 0
-        except Exception as exc:
-            logging.getLogger(__name__).debug("Zotero saving failed", exc_info=True)
-            with pause():
-                print(f"✗ Zotero: {exc}", file=sys.stderr)
-            return 1
-        finally:
-            reporter.finish_item(status)
+    return run(args, config, resolve_item=_resolve_item, article_line=_article_line)
 
 
 def _print_sources(config: Config, *, check: bool = False, as_json: bool = False) -> int:
@@ -647,6 +589,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = Config.load()
     except (ValueError, OSError) as exc:
+        if argv and argv[0] == "doctor" and "--json" in argv:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "strict": "--strict" in argv,
+                        "checks": [
+                            {"name": "configuration", "status": "error", "detail": str(exc)}
+                        ],
+                    }
+                )
+            )
+            return 1
         print(f"✗ Configuration: {exc}", file=sys.stderr)
         return 1
     if argv and argv[0] == "login":
@@ -677,6 +632,14 @@ def main(argv: list[str] | None = None) -> int:
         return _print_sources(config, check=args.check, as_json=args.json)
     if argv and argv[0] == "batch":
         return _run_batch(argv[1:], config)
+    if argv and argv[0] == "cache":
+        from .cache_cli import run
+
+        return run(argv[1:], config)
+    if argv and argv[0] == "doctor":
+        from .doctor_cli import run
+
+        return run(argv[1:], config)
     if argv and argv[0] == "resolve":
         args = _resolve_parser().parse_args(argv[1:])
         query = " ".join(args.query)
