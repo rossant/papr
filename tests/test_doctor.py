@@ -90,3 +90,12 @@ def test_inaccessible_output_and_config_are_required_errors(config, monkeypatch)
     assert required["output directory"]["status"] == "error"
     assert required["config directory"]["status"] == "error"
     assert not config.download_dir.exists()
+
+
+def test_dangling_symlink_output_directory_is_unusable(config, tmp_path):
+    from papr.doctor import _directory_status
+
+    config.download_dir.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    status, detail = _directory_status(config.download_dir)
+    assert status == "error"
+    assert "dangling symlink" in detail

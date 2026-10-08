@@ -6,6 +6,7 @@ import importlib.metadata
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -20,13 +21,22 @@ def _check(name: str, status: str, detail: str) -> dict[str, str]:
 
 def _directory_status(path: Path) -> tuple[str, str]:
     target = path.expanduser()
-    if target.exists() and not target.is_dir():
-        return "error", f"{target} exists but is not a directory"
     candidate = target
-    while not candidate.exists() and candidate != candidate.parent:
-        candidate = candidate.parent
-    if candidate.exists() and not candidate.is_dir():
-        return "error", f"nearest existing ancestor {candidate} is not a directory"
+    while True:
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            if candidate == candidate.parent:
+                return "error", f"no existing ancestor for {target}"
+            candidate = candidate.parent
+            continue
+        except OSError as exc:
+            return "error", f"cannot inspect directory path {candidate} ({type(exc).__name__})"
+        if stat.S_ISLNK(info.st_mode) and not candidate.exists():
+            return "error", f"{candidate} is a dangling symlink in the directory path"
+        if not candidate.is_dir():
+            return "error", f"nearest existing ancestor {candidate} is not a directory"
+        break
     if not os.access(candidate, os.W_OK | os.X_OK):
         return "error", f"no writable directory at {target}; nearest writable ancestor unavailable"
     if target.is_dir():
