@@ -4,6 +4,7 @@ from typing import Any
 
 from ..config import Config
 from ..http import client
+from ..item_types import from_source
 from ..model import Article, Person
 from .common import normalize_doi, score_article
 
@@ -34,6 +35,8 @@ def from_item(item: dict[str, Any]) -> Article:
         pmcid=_strip_id(ids.get("pmcid"), "https://pmc.ncbi.nlm.nih.gov/articles/"),
         url=location.get("landing_page_url") or item.get("id"),
         oa_pdf_url=best.get("pdf_url") or location.get("pdf_url"),
+        item_type=from_source(item.get("type")),
+        source_item_type=item.get("type"),
         source="openalex",
     )
 

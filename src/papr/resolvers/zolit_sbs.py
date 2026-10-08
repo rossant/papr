@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from ..config import Config
+from ..formats import csl
 from ..model import Article, Person
 from .common import extract_year, score_article
 
@@ -22,7 +24,34 @@ def find_domain(config: Config) -> Path | None:
             Path.cwd().parent / "zolit-sbs" / "domains" / "sbs",
         ]
     )
-    return next((p for p in candidates if (p / "key-publications.md").exists()), None)
+    return next(
+        (
+            p
+            for p in candidates
+            if any((p / name).is_file() for name in ("references.csl.json", "key-publications.md"))
+        ),
+        None,
+    )
+
+
+def load_references(domain: Path) -> list[Article]:
+    path = domain / "references.csl.json"
+    if not path.exists():
+        return parse_key_publications((domain / "key-publications.md").read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise ValueError("references.csl.json must contain a list of CSL objects")
+    articles = []
+    for item in data:
+        if not isinstance(item.get("title"), str) or not item["title"].strip():
+            raise ValueError("Each structured reference requires a title")
+        if item.get("papr-status") not in {None, "candidate", "verified"}:
+            raise ValueError("papr-status must be candidate or verified")
+        article = csl.decode(item)
+        article.source = "zolit-sbs"
+        article.source_key = item.get("id")
+        articles.append(article)
+    return articles
 
 
 def parse_key_publications(text: str) -> list[Article]:
@@ -48,6 +77,7 @@ def parse_key_publications(text: str) -> list[Article]:
                 title=title_match.group(1).strip(),
                 authors=authors,
                 year=year,
+                item_type="document",
                 source="zolit-sbs",
             )
         )
@@ -59,10 +89,8 @@ def search(query: str, config: Config) -> list[Article]:
     if not domain:
         return []
     try:
-        articles = parse_key_publications(
-            (domain / "key-publications.md").read_text(encoding="utf-8")
-        )
-    except OSError:
+        articles = load_references(domain)
+    except (OSError, ValueError, TypeError):
         return []
     for article in articles:
         article.score = score_article(query, article)

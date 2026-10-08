@@ -4,7 +4,7 @@ import re
 
 from ..model import Article, Person
 
-_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,]+),(.*)\}\s*$", re.S)
+_ENTRY_RE = re.compile(r"@(\w+)\s*\{\s*([^,]+),(.*)\}\s*$", re.S)
 _FIELD_RE = re.compile(r"(\w+)\s*=\s*(?:\{((?:[^{}]|\{[^{}]*\})*)\}|\"([^\"]*)\")\s*,?", re.S)
 
 
@@ -13,7 +13,16 @@ def _escape(value: str) -> str:
 
 
 def encode(article: Article, *, biblatex: bool = True) -> str:
-    entry_type = "article"
+    entry_type = {
+        "article-journal": "article",
+        "article-magazine": "article",
+        "article-newspaper": "article",
+        "book": "book",
+        "chapter": "incollection",
+        "paper-conference": "inproceedings",
+        "thesis": "phdthesis",
+        "report": "techreport",
+    }.get(article.item_type, "misc")
     fields: list[tuple[str, str]] = []
     if article.authors:
         authors = " and ".join(
@@ -22,7 +31,14 @@ def encode(article: Article, *, biblatex: bool = True) -> str:
         fields.append(("author", authors))
     fields.append(("title", article.title))
     if article.journal:
-        fields.append(("journaltitle" if biblatex else "journal", article.journal))
+        container_field = (
+            "booktitle"
+            if article.item_type in {"chapter", "paper-conference"}
+            else "journaltitle"
+            if biblatex
+            else "journal"
+        )
+        fields.append((container_field, article.journal))
     if article.year:
         fields.append(("date" if biblatex else "year", str(article.year)))
     if article.volume:
@@ -69,7 +85,7 @@ def _decode_entry(block: str) -> Article | None:
     if not match:
         return None
     fields: dict[str, str] = {}
-    for m in _FIELD_RE.finditer(match.group(2)):
+    for m in _FIELD_RE.finditer(match.group(3)):
         fields[m.group(1).lower()] = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
     title = fields.get("title", "").replace("{", "").replace("}", "")
     if not title and not fields.get("doi"):
@@ -91,7 +107,7 @@ def _decode_entry(block: str) -> Article | None:
         title=title,
         authors=authors,
         year=int(m.group()) if m else None,
-        journal=fields.get("journaltitle") or fields.get("journal"),
+        journal=fields.get("journaltitle") or fields.get("journal") or fields.get("booktitle"),
         volume=fields.get("volume"),
         issue=fields.get("number"),
         pages=(fields.get("pages") or "").replace("--", "-") or None,
@@ -101,5 +117,20 @@ def _decode_entry(block: str) -> Article | None:
             or (fields.get("eprint") if fields.get("eprinttype") == "pubmed" else None)
         ),
         url=fields.get("url"),
+        item_type={
+            "article": "article-journal",
+            "book": "book",
+            "incollection": "chapter",
+            "inbook": "chapter",
+            "inproceedings": "paper-conference",
+            "conference": "paper-conference",
+            "phdthesis": "thesis",
+            "mastersthesis": "thesis",
+            "thesis": "thesis",
+            "techreport": "report",
+            "report": "report",
+            "unpublished": "manuscript",
+        }.get(match.group(1).lower(), "document"),
+        source_item_type=match.group(1).lower(),
         source="bib",
     )

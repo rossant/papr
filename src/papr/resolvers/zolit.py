@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 from ..config import Config
+from ..item_types import from_zotero
 from ..model import Article, Person
 from .common import normalize_doi, score_article
 from .session import cached_library
@@ -118,6 +119,12 @@ def _article_from_row(
 ) -> Article:
     fields = _fields(row["zotero_json"])
     try:
+        payload = json.loads(row["zotero_json"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    zotero_data = payload.get("zotero", payload)
+    item_type = zotero_data.get("item_type") or zotero_data.get("itemType")
+    try:
         year = int(row["year"]) if row["year"] else None
     except (TypeError, ValueError):
         year = None
@@ -132,6 +139,14 @@ def _article_from_row(
         doi=normalize_doi(row["doi"]),
         url=fields.get("url") or None,
         abstract=fields.get("abstractNote") or None,
+        item_type=from_zotero(item_type),
+        source_item_type=item_type,
+        source_key=row["item_key"],
+        source_library=(
+            f"library:{zotero_data['library_id']}"
+            if zotero_data.get("library_id") is not None
+            else None
+        ),
         local_pdf=(
             local_pdfs.get(row["item_key"])
             if local_pdfs is not None

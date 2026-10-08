@@ -6,7 +6,7 @@ from ..model import Article
 def encode(article: Article) -> dict:
     out: dict = {
         "id": article.doi or article.pmid or article.citation_key,
-        "type": article.item_type if article.item_type.startswith("article") else "article-journal",
+        "type": article.item_type or "document",
         "title": article.title,
         "author": [
             {k: v for k, v in {"family": a.family, "given": a.given, "ORCID": a.orcid}.items() if v}
@@ -51,6 +51,6 @@ def decode(item: dict) -> Article:
         pmcid=item.get("PMCID"),
         url=item.get("URL"),
         abstract=item.get("abstract"),
-        item_type=item.get("type", "article-journal"),
+        item_type=item.get("type") or "document",
         source="csl",
     )

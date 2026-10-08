@@ -72,6 +72,49 @@ def test_zotero_api_item_mapping():
     assert article.doi == "10.1000/abc"
 
 
+@pytest.mark.parametrize(
+    "source_type,expected",
+    [
+        ("conferencePaper", "paper-conference"),
+        ("book", "book"),
+        ("bookSection", "chapter"),
+        ("preprint", "article"),
+        ("journalArticle", "article-journal"),
+        ("unexpected", "document"),
+        (None, "document"),
+    ],
+)
+def test_zotero_preserves_publication_type(source_type, expected):
+    article = zotero.from_api_item({"itemType": source_type, "title": "Example", "key": "ABC"})
+    assert article.item_type == expected
+    assert article.source_item_type == source_type
+    assert article.source_key == "ABC"
+
+
+@pytest.mark.parametrize("deleted_id", [1, 2])
+def test_zotero_sqlite_excludes_deleted_articles_and_pdfs(tmp_path, deleted_id):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    storage = tmp_path / "storage" / "ATTACH"
+    storage.mkdir(parents=True)
+    (storage / "paper.pdf").write_bytes(b"%PDF-1.7\n")
+    with sqlite3.connect(path) as conn:
+        conn.execute("create table deletedItems (itemID integer primary key)")
+        conn.execute("insert into deletedItems values (?)", (deleted_id,))
+    cfg = Config(zotero_api_url="", zotero_data_dir=tmp_path)
+    found = zotero.by_doi("10.1000/jenny", cfg)
+    matches = zotero.search_sqlite("Jenny 2006", cfg)
+    if deleted_id == 1:
+        assert found is None and matches == []
+    else:
+        assert found is not None and len(matches) == 1
+        assert found.local_pdf is None and matches[0].local_pdf is None
+
+
+def test_zotero_api_excludes_deleted_item():
+    assert zotero.from_api_item({"title": "Trashed", "deleted": 1}) is None
+
+
 def test_zotero_sqlite_author_year_and_attachment(tmp_path: Path):
     data_dir = tmp_path / "Zotero"
     storage = data_dir / "storage" / "ATTACH"
@@ -110,7 +153,9 @@ def test_zolit_database_search(tmp_path: Path):
     creators = json.dumps(
         [{"creator_type": "author", "first_name": "Carole", "last_name": "Jenny"}]
     )
-    zotero_json = json.dumps({"fields": {"publicationTitle": "Pediatrics"}})
+    zotero_json = json.dumps(
+        {"item_type": "conferencePaper", "fields": {"publicationTitle": "Pediatrics"}}
+    )
     conn.execute(
         "insert into items values (?, ?, ?, ?, ?, ?)",
         ("ABC", "A Jenny paper", "2006", creators, "10.1000/jenny", zotero_json),
@@ -127,6 +172,8 @@ def test_zolit_database_search(tmp_path: Path):
 
     assert len(result) == 1
     assert result[0].source == "zolit"
+    assert result[0].item_type == "paper-conference"
+    assert result[0].source_key == "ABC"
     assert result[0].local_pdf == str(pdf)
     assert zolit.by_doi("10.1000/JENNY", cfg).local_pdf == str(pdf)
 
@@ -147,6 +194,39 @@ def test_zolit_sbs_seed_parser(tmp_path: Path):
     assert len(result) == 1
     assert result[0].title == "Le syndrome du bebe secoue"
     assert result[0].source == "zolit-sbs"
+
+
+def test_zolit_sbs_structured_references_override_legacy_seeds(tmp_path):
+    domain = tmp_path / "domains" / "sbs"
+    domain.mkdir(parents=True)
+    (domain / "key-publications.md").write_text("- Jenny, `Old title`, 2006.\n")
+    (domain / "references.csl.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "seed",
+                    "title": "Jenny paper",
+                    "type": "paper-conference",
+                    "DOI": "10.1000/jenny",
+                    "issued": {"date-parts": [[2006]]},
+                    "author": [{"family": "Jenny"}],
+                    "papr-status": "candidate",
+                }
+            ]
+        )
+    )
+    result = zolit_sbs.search("Jenny 2006", Config(zolit_sbs_repo=tmp_path))
+    assert [article.title for article in result] == ["Jenny paper"]
+    assert result[0].item_type == "paper-conference"
+    assert result[0].doi == "10.1000/jenny"
+    assert result[0].source_key == "seed"
+
+
+def test_invalid_structured_seeds_do_not_silently_use_markdown(tmp_path):
+    (tmp_path / "key-publications.md").write_text("- Jenny, `Old title`, 2006.\n")
+    (tmp_path / "references.csl.json").write_text("{}")
+    with pytest.raises(ValueError, match="list of CSL"):
+        zolit_sbs.load_references(tmp_path)
 
 
 def test_zotero_batch_reuses_snapshot_and_bulk_attachment_query(tmp_path, monkeypatch):
@@ -201,8 +281,7 @@ def test_zotero_locked_snapshot_stops_retrying(tmp_path, monkeypatch):
 def test_zotero_api_only_loads_attachments_for_ranked_candidates(monkeypatch):
     requested = []
     items = [
-        {"key": str(index), "data": {"title": "Jenny paper", "date": "2006"}}
-        for index in range(20)
+        {"key": str(index), "data": {"title": "Jenny paper", "date": "2006"}} for index in range(20)
     ]
 
     def get(self, url, **kwargs):
@@ -276,7 +355,8 @@ def _add_zotero_groups(path: Path) -> None:
             """
         )
         for item_id, attachment_id, library_id, title in [
-            (3, 4, 8, "SBS Jenny paper"), (5, 6, 9, "Other Jenny paper"),
+            (3, 4, 8, "SBS Jenny paper"),
+            (5, 6, 9, "Other Jenny paper"),
         ]:
             conn.execute(
                 "insert into items values (?, ?, 1, ?)",
@@ -335,6 +415,8 @@ def test_zotero_group_sqlite_is_scoped_and_read_only(tmp_path):
     result = zotero.search_sqlite("Jenny 2006", config)
     assert [article.title for article in result] == ["SBS Jenny paper"]
     assert result[0].local_pdf == str(tmp_path / "storage" / "ATTACH8" / "paper.pdf")
+    assert result[0].source_key == "PARENT8"
+    assert result[0].source_library == "library:8"
     assert zotero.by_doi("10.1000/JENNY", config).title == "SBS Jenny paper"
     assert path.read_bytes() == original
 
@@ -363,7 +445,6 @@ def test_zotero_session_caches_each_group_separately(tmp_path):
         assert zotero.search_sqlite("Jenny 2006", config)[0].title == "Other Jenny paper"
         config.zotero_group_id = None
         assert len(zotero.search_sqlite("Jenny 2006", config)) == 3
-
 
 
 def test_zotero_group_without_library_mapping_does_not_read_all_records(tmp_path):

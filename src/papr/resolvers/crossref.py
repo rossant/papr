@@ -5,6 +5,7 @@ from urllib.parse import quote, urlparse
 
 from ..config import Config
 from ..http import client
+from ..item_types import from_source
 from ..model import Article, Person
 from .common import normalize_doi, score_article
 
@@ -61,7 +62,8 @@ def from_item(item: dict[str, Any]) -> Article:
         doi=normalize_doi(item.get("DOI")),
         url=_publisher_url(item),
         abstract=item.get("abstract"),
-        item_type=item.get("type") or "article-journal",
+        item_type=from_source(item.get("type")),
+        source_item_type=item.get("type"),
         oa_pdf_url=pdf,
         source="crossref",
     )

@@ -30,6 +30,9 @@ class Article:
     url: str | None = None
     abstract: str | None = None
     item_type: str = "article-journal"
+    source_item_type: str | None = None
+    source_key: str | None = None
+    source_library: str | None = None
     oa_pdf_url: str | None = None
     local_pdf: str | None = None
     source: str | None = None
@@ -60,11 +63,16 @@ class Article:
             "abstract",
             "oa_pdf_url",
             "local_pdf",
+            "source_item_type",
+            "source_key",
+            "source_library",
         ):
             if not getattr(self, name) and getattr(other, name):
                 setattr(self, name, getattr(other, name))
         if not self.authors and other.authors:
             self.authors = other.authors
+        if self.item_type in {"", "document"} and other.item_type:
+            self.item_type = other.item_type
         return self
 
     def to_dict(self) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from ..config import Config
+from ..item_types import from_zotero
 from ..model import Article, Person
 from ..progress import emit
 from .common import extract_year, normalize_doi, score_article
@@ -69,7 +70,7 @@ def _people(creators: list[dict]) -> list[Person]:
 
 def from_api_item(item: dict, local_pdf: str | None = None) -> Article | None:
     data = item.get("data", item)
-    if data.get("itemType") in NON_BIB_TYPES:
+    if data.get("itemType") in NON_BIB_TYPES or data.get("deleted"):
         return None
     title = (data.get("title") or "").strip()
     if not title:
@@ -92,6 +93,14 @@ def from_api_item(item: dict, local_pdf: str | None = None) -> Article | None:
         pmid=_pmid(data.get("extra")),
         url=data.get("url") or None,
         abstract=data.get("abstractNote") or None,
+        item_type=from_zotero(data.get("itemType")),
+        source_item_type=data.get("itemType"),
+        source_key=item.get("key") or data.get("key"),
+        source_library=(
+            f"{item['library'].get('type')}:{item['library'].get('id')}"
+            if item.get("library")
+            else None
+        ),
         local_pdf=local_pdf,
         source="zotero",
     )
@@ -117,8 +126,12 @@ def _library_prefix(config: Config) -> str:
 
 
 def _api_attachment(
-    client: httpx.Client, base: str, item_key: str, deadline: float,
-    *, prefix: str = "/users/0",
+    client: httpx.Client,
+    base: str,
+    item_key: str,
+    deadline: float,
+    *,
+    prefix: str = "/users/0",
 ) -> str | None:
     r = _api_get(
         client,
@@ -130,6 +143,8 @@ def _api_attachment(
         return None
     for child in r.json():
         data = child.get("data", child)
+        if data.get("deleted"):
+            continue
         filename = data.get("filename") or ""
         content_type = data.get("contentType") or ""
         if content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
@@ -242,16 +257,31 @@ def _snapshot(source: Path) -> sqlite3.Connection:
     return dst
 
 
+def _active_filter(conn: sqlite3.Connection, alias: str) -> str:
+    # Some older exports and minimal fixtures have no trash table.
+    has_trash = conn.execute(
+        "select 1 from sqlite_master where type='table' and name='deletedItems'"
+    ).fetchone()
+    if not has_trash:
+        return ""
+    return f" and not exists (select 1 from deletedItems d where d.itemID = {alias}.itemID)"
+
+
 def _sqlite_articles(
-    conn: sqlite3.Connection, data_dir: Path, library_id: int | None = None,
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    library_id: int | None = None,
 ) -> list[tuple[int, Article]]:
     library_filter = " and i.libraryID = ?" if library_id is not None else ""
+    has_library = any(row[1] == "libraryID" for row in conn.execute("pragma table_info(items)"))
+    library_select = ", i.libraryID" if has_library else ", null as libraryID"
+    active_filter = _active_filter(conn, "i")
     rows = conn.execute(
         f"""
-        select i.itemID, i.key, it.typeName
+        select i.itemID, i.key, it.typeName{library_select}
         from items i
         join itemTypes it on it.itemTypeID = i.itemTypeID
-        where it.typeName not in ('attachment', 'note', 'annotation'){library_filter}
+        where it.typeName not in ('attachment', 'note', 'annotation'){library_filter}{active_filter}
         """,
         (library_id,) if library_id is not None else (),
     ).fetchall()
@@ -298,6 +328,7 @@ def _sqlite_articles(
             }
         )
     attachment_filter = " and child.libraryID = ?" if library_id is not None else ""
+    attachment_filter += _active_filter(conn, "child")
     attachment_rows = conn.execute(
         f"""
         select ia.parentItemID, child.key, ia.path, ia.contentType
@@ -318,6 +349,7 @@ def _sqlite_articles(
         values = fields.get(row["itemID"], {})
         item = {
             "itemType": row["typeName"],
+            "key": row["key"],
             "title": values.get("title", ""),
             "date": values.get("date", ""),
             "DOI": values.get("DOI", ""),
@@ -334,18 +366,22 @@ def _sqlite_articles(
         }
         article = from_api_item(item)
         if article:
+            article.source_library = (
+                f"library:{row['libraryID']}" if row["libraryID"] is not None else None
+            )
             article.local_pdf = attachments.get(row["itemID"])
             out.append((row["itemID"], article))
     return out
 
 
 def _sqlite_attachment(conn: sqlite3.Connection, item_id: int, data_dir: Path) -> str | None:
+    active_filter = _active_filter(conn, "child")
     rows = conn.execute(
-        """
+        f"""
         select child.key, ia.path, ia.contentType
         from itemAttachments ia
         join items child on child.itemID = ia.itemID
-        where ia.parentItemID = ?
+        where ia.parentItemID = ?{active_filter}
         order by ia.itemID
         """,
         (item_id,),
@@ -389,7 +425,8 @@ def _sqlite_all(config: Config) -> list[Article]:
             if group_id is not None:
                 try:
                     group = conn.execute(
-                        "select libraryID from groups where groupID = ?", (group_id,),
+                        "select libraryID from groups where groupID = ?",
+                        (group_id,),
                     ).fetchone()
                 except sqlite3.Error:
                     group = None

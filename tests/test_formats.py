@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from papr.formats import bib, csl
 from papr.model import Article, Person
 
@@ -43,3 +45,37 @@ def test_bibtex_uses_legacy_fields():
     text = bib.encode(sample(), biblatex=False)
     assert "journal = {Journal of Examples}" in text
     assert "year = {2024}" in text
+
+
+@pytest.mark.parametrize(
+    "item_type", ["book", "chapter", "paper-conference", "article", "document"]
+)
+def test_csl_preserves_nonjournal_types(item_type):
+    article = sample()
+    article.item_type = item_type
+    assert csl.decode(csl.encode(article)).item_type == item_type
+
+
+@pytest.mark.parametrize(
+    "item_type,entry_type",
+    [
+        ("book", "book"),
+        ("chapter", "incollection"),
+        ("paper-conference", "inproceedings"),
+        ("document", "misc"),
+    ],
+)
+def test_bib_preserves_supported_types(item_type, entry_type):
+    article = sample()
+    article.item_type = item_type
+    encoded = bib.encode(article)
+    assert encoded.startswith(f"@{entry_type}{{")
+    assert bib.decode_many(encoded)[0].item_type == item_type
+
+
+def test_merge_fills_unknown_type_without_overriding_known_type():
+    article = Article(title="Unknown", item_type="document")
+    article.merge(Article(title="Book", item_type="book"))
+    assert article.item_type == "book"
+    article.merge(Article(title="Conflicting remote", item_type="article-journal"))
+    assert article.item_type == "book"
