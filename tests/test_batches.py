@@ -96,6 +96,9 @@ def test_exclusions_use_successful_pdf_identity_not_title(tmp_path, config):
     rows = export_batch(manifest, tmp_path / "out", config, exclude=[manifest])
     assert rows[0]["status"] == "excluded"
     assert not (tmp_path / "out").exists()
+    excluded_manifest = save_manifest(rows, config, tmp_path / "excluded.json")
+    assert not delivered_identities([excluded_manifest])
+    assert export_batch(excluded_manifest, tmp_path / "out", config) == []
     data = load_manifest(manifest)
     data["items"][0]["status"] = "error"
     manifest.write_text(json.dumps(data))

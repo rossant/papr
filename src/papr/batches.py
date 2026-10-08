@@ -42,7 +42,9 @@ def identities(article: Article) -> set[str]:
 
 
 def _has_exports(row: dict) -> bool:
-    return row["status"] == "ok" or row.get("export_status") in {"ok", "partial"}
+    return row["status"] in {"ok", "error"} and (
+        row["status"] == "ok" or row.get("export_status") in {"ok", "partial"}
+    )
 
 
 def save_manifest(rows: list[dict], config: Config, path: Path | None = None) -> Path:
@@ -147,13 +149,19 @@ def export_batch(
     excluded = delivered_identities(exclude or [])
     plan = []
     for original in data["items"]:
+        if original["status"] in {"excluded", "dry-run"}:
+            continue
         available = [*original.get("artifacts", []), *original.get("pending_artifacts", [])]
         if not (_has_exports(original) or original.get("pending_artifacts")) or not available:
             continue
         row = dict(original)
         article = _article(row["article"])
         if identities(article) & excluded:
-            row.update(status="excluded", exclusion_reason="already delivered")
+            row.update(
+                status="excluded", exclusion_reason="already delivered", artifacts=[], outputs=[]
+            )
+            row.pop("export_status", None)
+            row.pop("pending_artifacts", None)
             plan.append((row, []))
             continue
         files = [
@@ -220,6 +228,7 @@ def export_batch(
         row.pop("pending_artifacts", None)
         row.pop("error", None)
         row.pop("zotero", None)
+        row.pop("failed_stage", None)
         if not dry_run:
             pdf = next((a for a in artifacts if a["name"].lower().endswith(".pdf")), None)
             if pdf:
