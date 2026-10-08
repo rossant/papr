@@ -60,13 +60,18 @@ def materialize_article(
     *,
     use_local: bool = True,
     use_remote: bool = True,
+    enrich: bool = False,
     chooser: Callable[[str, list[Article], Config], Article] = select_candidate,
 ) -> tuple[Article, Path | None]:
     from .resolvers import resolve
 
+    options = {"enrich": True} if enrich else {}
+
     if isinstance(item, Article):
         if item.doi:
-            richer = resolve(item.doi, config, use_local=use_local, use_remote=use_remote)
+            richer = resolve(
+                item.doi, config, use_local=use_local, use_remote=use_remote, **options
+            )
             if richer:
                 try:
                     enriched = select_candidate(item.doi, richer, config)
@@ -76,6 +81,8 @@ def materialize_article(
                 return enriched, None
         return item, None
     if isinstance(item, Path):
-        return article_from_pdf(item, config, use_local=use_local, use_remote=use_remote), item
-    candidates = resolve(item, config, use_local=use_local, use_remote=use_remote)
+        return article_from_pdf(
+            item, config, use_local=use_local, use_remote=use_remote, **options
+        ), item
+    candidates = resolve(item, config, use_local=use_local, use_remote=use_remote, **options)
     return chooser(item, candidates, config), None

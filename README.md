@@ -100,7 +100,10 @@ Use `--non-interactive` to avoid that prompt.
 
 `papr zotero last` (also `papr zotero`) imports the exact PDF and metadata from
 the latest successful recorded download. It does not guess from file
-modification times in Downloads. Import an existing PDF with:
+modification times in Downloads. If the export was moved, papr can recover a
+byte-identical copy from the configured download directory or its content cache,
+preserving the attachment filename. A changed file at the recorded path is
+reported instead of silently replaced. Import an existing PDF with:
 
 ```bash
 papr zotero add paper.pdf
@@ -448,6 +451,38 @@ PAPR_ZOLIT_SBS_REPO
 papr refs.txt -f pdf,md --non-interactive --report report.json
 ```
 
+Every executed export batch also saves a versioned manifest in papr's local
+data directory (`batches/`). Use `--manifest batch.json` to choose its path.
+The manifest records each input's selection or exclusion, article metadata and
+source identifiers when available, compression outcome, output paths and SHA-256
+checksums. These are private local records: they can contain local paths and
+bibliographic metadata and should not be committed to a public repository.
+
+Re-export the saved files offline, without resolving references or recompressing:
+
+```bash
+papr refs.txt --manifest batch.json --non-interactive
+papr batch show batch.json
+papr batch check batch.json
+papr batch export batch.json -o ~/Downloads
+papr batch export batch.json -o ~/Dropbox --dry-run
+papr next-refs.txt --exclude-delivered batch.json --manifest next-batch.json
+```
+
+`--exclude-delivered` is repeatable and also works with `papr batch export`.
+It matches successful PDF exports by all available DOI, PMID and library/item-key
+aliases; titles alone do not prove identity. Local exports remain available if a
+subsequent Zotero save failed. Sources are checked before re-export starts;
+identical destination files are reused and different files receive a suffix
+unless `--overwrite` is explicit. An interrupted copy records successful and
+pending artifacts in the new manifest, which can be used to retry the export.
+
+Exported artifacts are cached by their checksum under papr's local cache
+directory (`artifacts/`), so relocation does not lose access to them. Removing
+this cache frees space, but missing originals then need to be restored.
+`--dry-run` does not copy files or record download history; a manifest is written
+for a normal export preview only when `--manifest` is supplied explicitly.
+
 In an interactive terminal, batch mode shows live progress on stderr with the
 current resolve, fetch, process, or export step and its elapsed time. The bar tracks
 completed papers; after two papers complete, it estimates remaining time. Remote
@@ -466,6 +501,26 @@ The process exits non-zero if at least one item fails.
 Unreadable or malformed input files and corrupt PDFs are recorded in the report;
 other inputs continue processing. Local SQLite libraries are read once per
 command and reused for subsequent references in that batch.
+
+Exact local DOI matches with an existing PDF avoid remote lookup. Use `--enrich`
+on export, `resolve`, or `zotero add` to request remote metadata enrichment.
+`--local-only` still prevents remote lookup, including with `--enrich`.
+
+`papr sources --check` probes SQLite access and compares the Zolit source files
+with the last successful synchronization; `--json` exposes the diagnostic states
+and synchronization timestamp. An older index has unknown freshness, and an
+absent item in that index does not establish absence from Zotero. Refresh it
+explicitly with `zolit zotero sync`. Group-scoped resolution also needs a fresh
+index carrying group provenance; legacy entries with unknown group membership
+are excluded rather than assigned to the configured group.
+
+Zotero, Zolit and structured SBS seeds preserve bibliographic document types in
+CSL and supported BibTeX exports, including conference papers and books. A
+journal-article type or DOI alone does not establish peer review, final
+publication status, infant age or a demonstrated CVT/SDH relationship.
+Use `--item-type article-journal` on export or `resolve` to restrict document
+types; repeat it to allow several types. Unresolved local PDFs have type
+`document`. Excluded document types are recorded in export manifests.
 
 ## Local PDFs
 

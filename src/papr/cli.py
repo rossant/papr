@@ -7,11 +7,12 @@ import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
-from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
 from . import __version__
+from .compress_cli import _atomic_pdf_copy as _atomic_pdf_copy
+from .compress_cli import _compress_parser, _run_compress
 from .config import DEFAULT_TEMPLATE, Config, set_setting
 from .export import FORMAT_SUFFIX, export_outputs, output_suffix
 from .fetchers import fetch_pdf, ucl
@@ -97,12 +98,14 @@ def _resolve_item(
     *,
     use_local: bool = True,
     use_remote: bool = True,
+    enrich: bool = False,
 ) -> tuple[Article, Path | None]:
     return materialize_article(
         item,
         config,
         use_local=use_local,
         use_remote=use_remote,
+        **({"enrich": True} if enrich else {}),
         chooser=lambda query, candidates, cfg: _choose(query, candidates, cfg, interactive),
     )
 
@@ -110,6 +113,9 @@ def _resolve_item(
 def _add_source_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quiet", action="store_true", help="suppress progress and summary")
     parser.add_argument("--verbose", action="store_true", help="show diagnostic details")
+    parser.add_argument(
+        "--enrich", action="store_true", help="enrich local metadata with remote sources"
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--local-only",
@@ -127,7 +133,9 @@ def _get_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="papr",
         description="Fetch and convert scholarly papers.",
-        epilog="Commands: resolve, compress, zotero, config, sources. Use papr COMMAND --help.",
+        epilog=(
+            "Commands: resolve, batch, compress, zotero, config, sources. Use papr COMMAND --help."
+        ),
     )
     p.add_argument(
         "inputs", nargs="+", help="reference, DOI, PMID, URL, PDF, .txt, .bib, or CSL-JSON"
@@ -160,9 +168,25 @@ def _get_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="resolve and show planned outputs without fetching"
     )
     p.add_argument("--report", type=Path, help="write a JSON batch report")
+    p.add_argument("--manifest", type=Path, help="save the persistent batch manifest at this path")
+    p.add_argument(
+        "--exclude-delivered",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="MANIFEST",
+        help="exclude works with successful PDF exports in a previous manifest (repeatable)",
+    )
     p.add_argument("--zotero", action="store_true", help="save the paper and PDF to Zotero")
     p.add_argument("--collection", help="Zotero collection name or key (with --zotero)")
     p.add_argument("--no-compress", action="store_true", help="export the original PDF")
+    p.add_argument(
+        "--item-type",
+        action="append",
+        default=[],
+        metavar="CSL_TYPE",
+        help="export only these bibliographic types (repeatable, e.g. article-journal)",
+    )
     _add_source_flags(p)
     return p
 
@@ -171,6 +195,7 @@ def _resolve_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="papr resolve", description="Resolve a scholarly reference.")
     p.add_argument("query", nargs="+")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--item-type", action="append", default=[], metavar="CSL_TYPE")
     _add_source_flags(p)
     return p
 
@@ -268,6 +293,8 @@ def _input_values(values: list[str]) -> list[str]:
 
 
 def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Reporter) -> int:
+    from .batches import delivered_identities, identities, identity, record_artifacts, save_manifest
+
     if args.collection and not args.zotero:
         print("✗ --collection requires --zotero", file=sys.stderr)
         return 1
@@ -279,6 +306,11 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
     interactive = not args.non_interactive and sys.stdin.isatty()
     use_local = not args.no_local
     use_remote = not args.local_only
+    try:
+        excluded = delivered_identities(args.exclude_delivered)
+    except ValueError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
     report: list[dict] = []
     failures = 0
     items: list[str | Article | Path] = []
@@ -317,7 +349,22 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                 interactive,
                 use_local=use_local,
                 use_remote=use_remote,
+                **({"enrich": True} if args.enrich else {}),
             )
+            row["article"] = article.to_dict()
+            row["identity"] = identity(article)
+            if args.item_type and article.item_type not in args.item_type:
+                row.update(
+                    status="excluded", exclusion_reason=f"document type: {article.item_type}"
+                )
+                with pause():
+                    print(f"− {_article_line(article)} — document type: {article.item_type}")
+                continue
+            if identities(article) & excluded:
+                row.update(status="excluded", exclusion_reason="already delivered")
+                with pause():
+                    print(f"− {_article_line(article)} — already delivered")
+                continue
             row["doi"] = article.doi
             row["title"] = article.title
             reporter.label = _article_line(article)
@@ -347,6 +394,11 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                     source="local",
                     outputs=[str(destination)],
                 )
+                if not args.dry_run:
+                    row.update(record_artifacts(article, [destination], config), export_status="ok")
+                    from .history import record_download
+
+                    record_download(article, destination, config)
                 continue
             base = basename(article, config, args.filename)
             if args.dry_run:
@@ -410,6 +462,7 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                     processor=processor_used,
                     outputs=[str(path) for path in outputs],
                 )
+                row.update(record_artifacts(article, outputs, config), export_status="ok")
                 exported_pdf = next((path for path in outputs if path.suffix == ".pdf"), None)
                 if exported_pdf is not None:
                     from .history import record_download
@@ -460,115 +513,21 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
     reporter.summary(failures, output_dir)
     if args.report:
         report_path = args.report.expanduser()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(
-            json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-    return 1 if failures else 0
+        from .artifacts import atomic_json
 
-
-def _compress_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="papr compress", description="Compress local PDFs.")
-    parser.add_argument("inputs", nargs="+", type=Path, help="PDF files to compress")
-    parser.add_argument(
-        "-i", "--in-place", action="store_true", help="replace the original if smaller"
-    )
-    parser.add_argument("-o", "--output", type=Path, help="directory for compressed copies")
-    parser.add_argument(
-        "--dpi", type=int, help="color/gray image resolution (default: personal setting)"
-    )
-    parser.add_argument(
-        "--overwrite", action="store_true", help="replace existing compressed copies"
-    )
-    parser.add_argument("--quiet", action="store_true", help="suppress progress and summary")
-    parser.add_argument("--verbose", action="store_true", help="show diagnostic details")
-    return parser
-
-
-def _atomic_pdf_copy(source: Path, destination: Path, *, overwrite: bool):
-    """Publish a complete PDF without truncating an existing file on failure."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=destination.parent, suffix=".pdf", delete=False
-        ) as file:
-            temporary = Path(file.name)
-        shutil.copy2(source, temporary)
-        if overwrite:
-            if destination.exists():
-                temporary.chmod(destination.stat().st_mode & 0o777)
-            temporary.replace(destination)
-        else:
-            # An exclusive hard link also protects against a destination appearing mid-copy.
-            destination.hardlink_to(temporary)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def _run_compress(args: argparse.Namespace, config: Config) -> int:
-    from .compression import compress_pdf
-
-    if args.in_place and args.output:
-        print("✗ --in-place cannot be combined with --output", file=sys.stderr)
-        return 1
-    try:
-        if args.dpi is not None:
-            config = replace(config, pdf_compression_dpi=args.dpi)
-    except ValueError as exc:
-        print(f"✗ Compression: {exc}", file=sys.stderr)
-        return 1
-    failures = 0
-    with Reporter(enabled=not args.quiet) as reporter:
-        reporter.start_batch(len(args.inputs))
-        for input_path in args.inputs:
-            source = input_path.expanduser().resolve()
-            reporter.start_item(str(source))
-            status = "error"
-            try:
-                emit("compress", "Checking PDF")
-                if not source.is_file() or source.suffix.lower() != ".pdf":
-                    raise ValueError(f"PDF not found: {source}")
-                prepared, result = compress_pdf(source, config, enabled=True)
-                if result["status"] == "failed":
-                    raise RuntimeError(result.get("reason", "Compression failed"))
-                if result.get("reason") == "unreadable PDF":
-                    raise ValueError("Unreadable or corrupt PDF")
-                if result["saved_bytes"] > 0:
-                    destination = (
-                        source
-                        if args.in_place
-                        else (
-                            (args.output.expanduser() if args.output else source.parent)
-                            / f"{source.stem}.compressed.pdf"
-                        )
-                    )
-                    if destination.exists() and not args.in_place and not args.overwrite:
-                        raise FileExistsError(f"{destination} already exists; use --overwrite")
-                    emit("export", "Saving compressed PDF")
-                    _atomic_pdf_copy(
-                        prepared, destination, overwrite=args.in_place or args.overwrite
-                    )
-                    with pause():
-                        print(
-                            f"✓ {destination} — {result['original_bytes']:,} → "
-                            f"{result['output_bytes']:,} bytes "
-                            f"({result['savings_percent']:g}% smaller)"
-                        )
-                else:
-                    with pause():
-                        print(f"✓ {source} — unchanged: {result.get('reason', 'already compact')}")
-                status = "ok"
-            except Exception as exc:
-                failures += 1
-                logging.getLogger(__name__).debug("PDF compression failed", exc_info=True)
-                with pause():
-                    print(f"✗ {source}: {exc}", file=sys.stderr)
-            finally:
-                reporter.finish_item(status)
-        directory = args.output.expanduser() if args.output else args.inputs[0].expanduser().parent
-        reporter.summary(failures, directory.resolve())
+        try:
+            atomic_json(report_path, report)
+        except (OSError, ValueError) as exc:
+            print(f"✗ Cannot save batch report: {exc}", file=sys.stderr)
+            failures += 1
+    if not args.dry_run or args.manifest:
+        try:
+            manifest = save_manifest(report, config, args.manifest)
+            if not args.quiet:
+                print(f"Batch manifest: {manifest}", file=sys.stderr)
+        except (OSError, ValueError) as exc:
+            print(f"✗ Cannot save batch manifest: {exc}", file=sys.stderr)
+            return 1
     return 1 if failures else 0
 
 
@@ -616,6 +575,7 @@ def _run_zotero(args: argparse.Namespace, config: Config) -> int:
                     interactive,
                     use_local=not args.no_local,
                     use_remote=not args.local_only,
+                    **({"enrich": True} if args.enrich else {}),
                 )
             reporter.label = _article_line(article)
             collection = args.collection or config.zotero_collection
@@ -660,11 +620,23 @@ def _run_zotero(args: argparse.Namespace, config: Config) -> int:
             reporter.finish_item(status)
 
 
-def _print_sources(config: Config) -> int:
-    for status in source_statuses(config):
+def _print_sources(config: Config, *, check: bool = False, as_json: bool = False) -> int:
+    from dataclasses import asdict
+
+    statuses = source_statuses(config, check=True) if check else source_statuses(config)
+    if as_json:
+        print(json.dumps([asdict(status) for status in statuses], indent=2, ensure_ascii=False))
+        return 0
+    for status in statuses:
         mark = "✓" if status.available else "−"
         print(f"{mark} {status.name:<12} {status.detail}")
     return 0
+
+
+def _run_batch(argv: list[str], config: Config) -> int:
+    from .batch_cli import run
+
+    return run(argv, config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -696,7 +668,15 @@ def main(argv: list[str] | None = None) -> int:
         with _diagnostics(args.verbose), resolution_session():
             return _run_zotero(args, config)
     if argv and argv[0] == "sources":
-        return _print_sources(config)
+        parser = argparse.ArgumentParser(prog="papr sources", description="Inspect local sources.")
+        parser.add_argument("--check", action="store_true", help="probe access and index freshness")
+        parser.add_argument(
+            "--json", action="store_true", help="print machine-readable diagnostics"
+        )
+        args = parser.parse_args(argv[1:])
+        return _print_sources(config, check=args.check, as_json=args.json)
+    if argv and argv[0] == "batch":
+        return _run_batch(argv[1:], config)
     if argv and argv[0] == "resolve":
         args = _resolve_parser().parse_args(argv[1:])
         query = " ".join(args.query)
@@ -715,7 +695,10 @@ def main(argv: list[str] | None = None) -> int:
                     config,
                     use_local=not args.no_local,
                     use_remote=not args.local_only,
+                    **({"enrich": True} if args.enrich else {}),
                 )
+                if args.item_type:
+                    candidates = [a for a in candidates if a.item_type in args.item_type]
                 status = "ok" if candidates else "error"
             except Exception as exc:
                 logging.getLogger(__name__).debug("Resolution failed: %s", query, exc_info=True)

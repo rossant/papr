@@ -13,8 +13,14 @@ from .selection import select_candidate
 
 
 def article_from_pdf(
-    path: Path, config: Config, *, use_local: bool = True, use_remote: bool = True
+    path: Path,
+    config: Config,
+    *,
+    use_local: bool = True,
+    use_remote: bool = True,
+    enrich: bool = False,
 ) -> Article:
+    options = {"enrich": True} if enrich else {}
     reader = PdfReader(str(path))
     meta = reader.metadata or {}
     chunks = []
@@ -35,7 +41,7 @@ def article_from_pdf(
         None,
     )
     if doi:
-        resolved = resolve(doi, config, use_local=use_local, use_remote=use_remote)
+        resolved = resolve(doi, config, use_local=use_local, use_remote=use_remote, **options)
         if resolved:
             try:
                 return select_candidate(doi, resolved, config)
@@ -48,7 +54,7 @@ def article_from_pdf(
     if filename_query and filename_query not in queries:
         queries.append(filename_query)
     for query in queries:
-        resolved = resolve(query, config, use_local=use_local, use_remote=use_remote)
+        resolved = resolve(query, config, use_local=use_local, use_remote=use_remote, **options)
         if resolved:
             try:
                 return select_candidate(query, resolved, config)
@@ -60,4 +66,11 @@ def article_from_pdf(
     if author:
         parts = author.split()
         authors = [Person(family=parts[-1], given=" ".join(parts[:-1]))]
-    return Article(title=title or path.stem, authors=authors, year=year, doi=doi, source="pdf")
+    return Article(
+        title=title or path.stem,
+        authors=authors,
+        year=year,
+        doi=doi,
+        source="pdf",
+        item_type="document",
+    )
