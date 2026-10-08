@@ -1,3 +1,5 @@
+import pytest
+
 from papr import resolvers
 from papr.config import Config
 from papr.model import Article, Person
@@ -77,3 +79,50 @@ def test_doi_uses_local_metadata_and_pdf(monkeypatch):
 
     assert result[0].local_pdf == "/tmp/paper.pdf"
     assert result[0].source == "zotero"
+
+
+@pytest.mark.parametrize(
+    "enrich,pdf_exists,expected_calls",
+    [
+        (False, True, 0),
+        (True, True, 2),
+        (False, False, 2),
+    ],
+)
+def test_doi_remote_enrichment_policy(tmp_path, monkeypatch, enrich, pdf_exists, expected_calls):
+    local = _jenny("Known locally")
+    pdf = tmp_path / "paper.pdf"
+    if pdf_exists:
+        pdf.write_bytes(b"%PDF-1.7\n")
+    local.local_pdf = str(pdf)
+    monkeypatch.setattr(resolvers, "_local_by_doi", lambda doi, config: [local])
+    calls = []
+
+    def remote(doi, config):
+        calls.append(doi)
+        return None
+
+    monkeypatch.setattr(resolvers.crossref, "by_doi", remote)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", remote)
+    assert resolvers.resolve("10.1000/jenny", Config(), enrich=enrich) == [local]
+    assert len(calls) == expected_calls
+
+
+def test_doi_enrichment_preserves_local_conference_type(monkeypatch):
+    local = _jenny("Known locally")
+    local.item_type = "paper-conference"
+    monkeypatch.setattr(resolvers, "_local_by_doi", lambda doi, config: [local])
+    monkeypatch.setattr(
+        resolvers.crossref,
+        "by_doi",
+        lambda doi, config: Article(
+            "Known locally",
+            doi=doi,
+            item_type="article-journal",
+            abstract="Enrichment",
+        ),
+    )
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda doi, config: None)
+    result = resolvers.resolve("10.1000/jenny", Config(), enrich=True)
+    assert result[0].item_type == "paper-conference"
+    assert result[0].abstract == "Enrichment"

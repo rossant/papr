@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from ..config import Config
 from ..model import Article
@@ -80,11 +81,14 @@ def resolve(
     *,
     use_local: bool = True,
     use_remote: bool = True,
+    enrich: bool = False,
 ) -> list[Article]:
     doi = extract_doi(query)
     if doi:
         local = _local_by_doi(doi, config) if use_local and config.local_sources else []
         if not use_remote:
+            return local
+        if not enrich and any(a.local_pdf and Path(a.local_pdf).is_file() for a in local):
             return local
         remote = []
         for fn in (crossref.by_doi, openalex.by_doi):
@@ -125,7 +129,7 @@ def resolve(
             return local
         if _strong_local(local, config):
             best = local[0]
-            if best.doi or best.local_pdf:
+            if not enrich and (best.doi or best.local_pdf):
                 return local
             remote = _remote_search(_expanded_query(best), config)
             result = deduplicate([*local, *remote])
