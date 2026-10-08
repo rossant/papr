@@ -197,6 +197,23 @@ Example:
 ✓ mistral      key configured
 ```
 
+## Installation diagnostics
+
+```bash
+papr doctor
+papr doctor --json
+papr doctor --strict
+```
+
+The doctor checks the installation, configuration, directory access, PDF
+backends and local source availability, including Zolit index freshness. It
+does not create directories, modify libraries or call remote bibliographic/OCR
+services. Saved credentials and browser profiles are checked for presence;
+their contents are not printed and authentication is not tested. Optional
+backends, unavailable local sources and untested remote connectivity produce
+warnings. Required directory or installation failures return a non-zero exit
+code; `--strict` also fails on warnings.
+
 ## Control local vs remote resolution
 
 ```bash
@@ -462,12 +479,34 @@ Re-export the saved files offline, without resolving references or recompressing
 
 ```bash
 papr refs.txt --manifest batch.json --non-interactive
+papr refs.txt --batch-name reading --non-interactive
+papr batch list
+papr batch list --json
+papr batch summary reading
 papr batch show batch.json
 papr batch check batch.json
 papr batch export batch.json -o ~/Downloads
 papr batch export batch.json -o ~/Dropbox --dry-run
+papr batch resume reading
 papr next-refs.txt --exclude-delivered batch.json --manifest next-batch.json
 ```
+
+`--batch-name` registers a friendly name alongside a stable batch ID. Batch
+commands and `--exclude-delivered` accept a name, ID or manifest path. The local
+catalog also tracks manifests saved outside the default data directory. Names
+can be reused; ambiguous names must be replaced by an ID or explicit path.
+`list` and `summary` verify artifact checksums and report available, missing,
+changed, unreadable and incomplete items. Availability includes recoverable
+cache copies; it does not prove bibliographic relevance or publication status.
+
+`resume` retries saved exports offline and retains their output directory unless
+`-o` overrides it. Successful files with identical contents are reused. Unresolved
+references and missing or changed artifacts remain failures and return a
+non-zero exit code; reference resolution must be rerun separately. Resume does
+not retry Zotero imports. Export and resume create a new manifest unless
+`--manifest` explicitly selects a path; `--name` names the result, and otherwise
+the original name is retained. Use the new manifest's ID for the next retry if
+retaining the name makes it ambiguous.
 
 `--exclude-delivered` is repeatable and also works with `papr batch export`.
 It matches successful PDF exports by all available DOI, PMID and library/item-key
@@ -481,7 +520,8 @@ Exported artifacts are cached by their checksum under papr's local cache
 directory (`artifacts/`), so relocation does not lose access to them. Removing
 this cache frees space, but missing originals then need to be restored.
 `--dry-run` does not copy files or record download history; a manifest is written
-for a normal export preview only when `--manifest` is supplied explicitly.
+for a normal export preview only when `--manifest` or `--batch-name` is supplied
+explicitly. Batch export and resume previews do not save a manifest.
 
 In an interactive terminal, batch mode shows live progress on stderr with the
 current resolve, fetch, process, or export step and its elapsed time. The bar tracks
@@ -522,6 +562,31 @@ Use `--item-type article-journal` on export or `resolve` to restrict document
 types; repeat it to allow several types. Unresolved local PDFs have type
 `document`. Excluded document types are recorded in export manifests.
 
+## Cache maintenance
+
+```bash
+papr cache status
+papr cache status --json
+papr cache prune --dry-run
+papr cache prune
+papr cache prune --dry-run --manifest old-external-batch.json
+```
+
+Status reports sizes for artifact, PDF, processor and recovered-file caches.
+Pruning removes only orphaned artifact objects at least seven days old. It
+protects all known manifests, including externally registered manifests and
+pending exports, plus the latest recorded download. Older external manifests
+that predate the catalog can be protected with repeatable `--manifest` options.
+Missing or malformed protection records stop pruning. The PDF, processor and
+recovered-file caches, browser profiles and exported user files are retained.
+
+`--older-than DAYS` changes the grace period; `0` disables it. A dry run lists
+eligible objects without creating files or directories. Pruning and exports
+share a process lock so pruning cannot remove an artifact while an export is
+publishing its manifest. Export operations are serialized, including their
+retrieval and processing stages. A competing state writer waits up to five
+seconds, then reports that Papr is busy; retry it after the current operation.
+
 ## Local PDFs
 
 ```bash
@@ -541,7 +606,7 @@ the destination without renaming or replacing PDFs.
 ```bash
 git clone https://github.com/rossant/papr.git
 cd papr
-uv sync --dev
+uv sync --locked --dev
 uv run pytest
 uv run ruff check .
 uv build
@@ -556,4 +621,21 @@ uv tool install --force --editable '.[ucl]'
 
 Omit `[ucl]` if you do not use institutional browser access.
 
-CI tests Python 3.11 and 3.13 on Linux and macOS.
+`uv.lock` pins development and test dependencies. Library installations use the
+compatible dependency ranges in `pyproject.toml`; Zolit and zolit-sbs remain
+optional local integrations rather than runtime package dependencies. Update
+the lock deliberately with `uv lock --upgrade`, then rerun the checks above.
+
+CI tests Python 3.11 and 3.13 on Linux and macOS. A separate job checks the latest
+Zolit main branch using synthetic indexes written by Zolit itself. Run those
+contract checks with a sibling checkout:
+
+```bash
+uv pip install -e ../zolit
+uv run --no-sync pytest -q -m integration tests/integration
+uv sync --locked --dev
+```
+
+`--no-sync` retains the temporarily installed sibling package; the final sync
+restores the ordinary Papr development environment. These tests do not read or
+modify a real Zotero library. They are skipped when Zolit is not installed.

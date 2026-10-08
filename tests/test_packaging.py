@@ -13,7 +13,7 @@ def test_sdist_includes_public_source_only(tmp_path):
     root = Path(__file__).resolve().parents[1]
     project = tmp_path / "project"
     (project / "src" / "papr").mkdir(parents=True)
-    for name in ("pyproject.toml", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "README.md", "LICENSE", "uv.lock"):
         shutil.copyfile(root / name, project / name)
     (project / "src" / "papr" / "__init__.py").write_text('__version__ = "0.2.0"\n')
     (project / "private.docx").write_bytes(b"private note")
@@ -32,4 +32,5 @@ def test_sdist_includes_public_source_only(tmp_path):
         names = stream.getnames()
     assert any(name.endswith("/src/papr/__init__.py") for name in names)
     assert any(name.endswith("/pyproject.toml") for name in names)
+    assert any(name.endswith("/uv.lock") for name in names)
     assert not any("private" in name or "data.local" in name for name in names)
