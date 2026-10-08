@@ -21,18 +21,6 @@ class SourceStatus:
     last_synced_at: str | None = None
 
 
-def _count_sqlite(path: Path, table: str) -> int | None:
-    try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.1)
-        try:
-            row = conn.execute(f"select count(*) from {table}").fetchone()
-            return int(row[0]) if row else None
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
-
-
 def _zotero_status(config: Config, *, check: bool = False) -> SourceStatus:
     base = config.zotero_api_url.rstrip("/")
     unavailable = "not detected"
@@ -94,22 +82,27 @@ def _zolit_status(config: Config, *, check: bool = False) -> SourceStatus:
     db = zolit.find_db(config)
     if not db:
         return SourceStatus("zolit", False, "not detected", "unavailable")
-    count = _count_sqlite(db, "items")
     detail = str(db)
-    if count is None:
-        return SourceStatus("zolit", False, f"{detail}, database unreadable", "unavailable")
-    detail += f", {count} items"
     try:
         conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=0.1)
         conn.row_factory = sqlite3.Row
         try:
-            row = conn.execute("select * from source_sync where source='zotero'").fetchone()
+            conn.execute("begin")
+            count = conn.execute("select count(*) from items").fetchone()[0]
+            try:
+                row = conn.execute("select * from source_sync where source='zotero'").fetchone()
+            except sqlite3.Error:
+                row = None
         finally:
             conn.close()
     except sqlite3.Error:
-        row = None
+        return SourceStatus("zolit", False, f"{detail}, database unreadable", "unavailable")
+    detail += f", {count} items"
     if row is None:
         return SourceStatus("zolit", True, f"{detail}, last sync unknown", "unknown")
+    required = {"synced_at", "source_path", "source_fingerprint_json"}
+    if not required.issubset(row.keys()) or not row["synced_at"]:
+        return SourceStatus("zolit", True, f"{detail}, invalid sync metadata", "unknown")
     synced_at = row["synced_at"]
     detail += f", synced {synced_at}"
     state = "unknown"
@@ -128,7 +121,7 @@ def _zolit_status(config: Config, *, check: bool = False) -> SourceStatus:
             current = {"main": fingerprint(source), "wal": fingerprint(Path(str(source) + "-wal"))}
             if current["main"] is None:
                 detail += ", source database unavailable; freshness unknown"
-            elif not isinstance(expected, dict) or "main" not in expected or "wal" not in expected:
+            elif not _valid_sync_fingerprint(expected):
                 detail += ", invalid sync fingerprint; freshness unknown"
             else:
                 state = "ready" if current == expected else "changed"
@@ -138,6 +131,22 @@ def _zolit_status(config: Config, *, check: bool = False) -> SourceStatus:
         except (OSError, ValueError, TypeError):
             detail += ", freshness unknown"
     return SourceStatus("zolit", True, detail, state, synced_at)
+
+
+def _valid_sync_fingerprint(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"main", "wal"}:
+        return False
+    for key in ("main", "wal"):
+        stat = value[key]
+        if stat is None:
+            if key == "main":
+                return False
+            continue
+        if not isinstance(stat, dict) or set(stat) != {"size", "mtime_ns"}:
+            return False
+        if not all(type(stat[field]) is int and stat[field] >= 0 for field in stat):
+            return False
+    return True
 
 
 def _sbs_status(config: Config) -> SourceStatus:

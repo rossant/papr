@@ -143,7 +143,9 @@ def _article_from_row(
         source_item_type=item_type,
         source_key=row["item_key"],
         source_library=(
-            f"library:{zotero_data['library_id']}"
+            f"group:{zotero_data['group_id']}"
+            if zotero_data.get("group_id") is not None
+            else f"library:{zotero_data['library_id']}"
             if zotero_data.get("library_id") is not None
             else None
         ),
@@ -156,9 +158,9 @@ def _article_from_row(
     )
 
 
-def _all_articles(db: Path) -> list[Article]:
+def _all_articles(db: Path, group_id: int | None = None) -> list[Article]:
     def load() -> list[Article]:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=0.1)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
@@ -167,6 +169,17 @@ def _all_articles(db: Path) -> list[Article]:
                 from items where title is not null and title != ''
                 """
             ).fetchall()
+            if group_id is not None:
+                scoped = []
+                for row in rows:
+                    try:
+                        payload = json.loads(row["zotero_json"] or "{}")
+                        metadata = payload.get("zotero", payload)
+                        if metadata.get("group_id") == group_id:
+                            scoped.append(row)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                rows = scoped
             local_pdfs: dict[str, str] = {}
             try:
                 attachments = conn.execute(
@@ -187,14 +200,14 @@ def _all_articles(db: Path) -> list[Article]:
         finally:
             conn.close()
 
-    return cached_library(("zolit", str(db.resolve())), load)
+    return cached_library(("zolit", str(db.resolve()), group_id), load)
 
 
 def search(query: str, config: Config) -> list[Article]:
     db = find_db(config)
     if not db:
         return []
-    articles = _all_articles(db)
+    articles = _all_articles(db, config.zotero_group_id)
     for article in articles:
         article.score = score_article(query, article)
     articles = [a for a in articles if (a.score or 0.0) >= 0.35]
@@ -207,7 +220,7 @@ def by_doi(doi: str, config: Config) -> Article | None:
     db = find_db(config)
     if not target or not db:
         return None
-    for article in _all_articles(db):
+    for article in _all_articles(db, config.zotero_group_id):
         if article.doi == target:
             article.score = 1.0
             return article

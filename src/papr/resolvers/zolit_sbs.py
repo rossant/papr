@@ -7,7 +7,7 @@ from pathlib import Path
 from ..config import Config
 from ..formats import csl
 from ..model import Article, Person
-from .common import extract_year, score_article
+from .common import extract_year, normalize_doi, score_article
 
 TITLE_RE = re.compile(r"\x60([^\x60]+)\x60")
 
@@ -48,6 +48,7 @@ def load_references(domain: Path) -> list[Article]:
         if item.get("papr-status") not in {None, "candidate", "verified"}:
             raise ValueError("papr-status must be candidate or verified")
         article = csl.decode(item)
+        article.doi = normalize_doi(article.doi)
         article.source = "zolit-sbs"
         article.source_key = item.get("id")
         articles.append(article)
@@ -97,3 +98,19 @@ def search(query: str, config: Config) -> list[Article]:
     articles = [a for a in articles if (a.score or 0.0) >= 0.35]
     articles.sort(key=lambda a: a.score or 0.0, reverse=True)
     return articles[: config.max_candidates]
+
+
+def by_doi(doi: str, config: Config) -> Article | None:
+    target = normalize_doi(doi)
+    domain = find_domain(config)
+    if not target or not domain:
+        return None
+    try:
+        articles = load_references(domain)
+    except (OSError, ValueError, TypeError):
+        return None
+    for article in articles:
+        if article.doi == target:
+            article.score = 1.0
+            return article
+    return None

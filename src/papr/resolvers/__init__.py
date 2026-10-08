@@ -12,7 +12,7 @@ from .common import deduplicate, extract_doi, extract_pmid
 logger = logging.getLogger(__name__)
 
 LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search)
-LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi)
+LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi, zolit_sbs.by_doi)
 
 
 def _local_search(query: str, config: Config) -> list[Article]:

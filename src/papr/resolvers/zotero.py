@@ -193,6 +193,8 @@ def _api_articles(query: str, config: Config, qmode: str) -> list[Article]:
             key = item.get("key") or item.get("data", {}).get("key")
             article = from_api_item(item)
             if article:
+                if group_id is not None:
+                    article.source_library = f"group:{group_id}"
                 article.score = score_article(query, article)
                 if qmode == "everything":
                     if article.doi != normalize_doi(query):
@@ -275,6 +277,10 @@ def _sqlite_articles(
     library_filter = " and i.libraryID = ?" if library_id is not None else ""
     has_library = any(row[1] == "libraryID" for row in conn.execute("pragma table_info(items)"))
     library_select = ", i.libraryID" if has_library else ", null as libraryID"
+    try:
+        group_by_library = dict(conn.execute("select libraryID, groupID from groups").fetchall())
+    except sqlite3.Error:
+        group_by_library = {}
     active_filter = _active_filter(conn, "i")
     rows = conn.execute(
         f"""
@@ -366,9 +372,11 @@ def _sqlite_articles(
         }
         article = from_api_item(item)
         if article:
-            article.source_library = (
-                f"library:{row['libraryID']}" if row["libraryID"] is not None else None
-            )
+            group = group_by_library.get(row["libraryID"])
+            if group is not None:
+                article.source_library = f"group:{group}"
+            elif row["libraryID"] is not None:
+                article.source_library = f"library:{row['libraryID']}"
             article.local_pdf = attachments.get(row["itemID"])
             out.append((row["itemID"], article))
     return out

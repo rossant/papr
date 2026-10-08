@@ -103,3 +103,49 @@ def test_invalid_sbs_seed_file_is_unavailable(tmp_path):
     (domain / "references.csl.json").write_text("invalid json")
     status = _sbs_status(Config(zolit_sbs_repo=tmp_path))
     assert not status.available and status.state == "unavailable"
+
+
+@pytest.mark.parametrize("metadata", ["missing-fields", "bad-fingerprint", "invalid-json"])
+def test_zolit_inconsistent_sync_metadata_reports_unknown(tmp_path, metadata):
+    source = tmp_path / "zotero.sqlite"
+    source.write_bytes(b"source")
+    db = tmp_path / "zolit.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute("create table items (item_key text)")
+        if metadata == "missing-fields":
+            conn.execute("create table source_sync (source text)")
+            conn.execute("insert into source_sync values ('zotero')")
+        else:
+            conn.execute(
+                "create table source_sync (source text, synced_at text, source_path text, "
+                "source_fingerprint_json text)"
+            )
+            fingerprint = (
+                '{"main": null, "wal": null}' if metadata == "bad-fingerprint" else "invalid"
+            )
+            conn.execute(
+                "insert into source_sync values (?, ?, ?, ?)",
+                (
+                    "zotero",
+                    "2026-10-08T12:00:00+00:00",
+                    str(source),
+                    fingerprint,
+                ),
+            )
+    before = db.read_bytes()
+    status = _zolit_status(Config(zolit_db=db), check=True)
+    assert status.available and status.state == "unknown"
+    assert db.read_bytes() == before
+
+
+def test_zolit_locked_index_is_unavailable(tmp_path):
+    db = tmp_path / "zolit.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute("create table items (item_key text)")
+    writer = sqlite3.connect(db)
+    writer.execute("begin exclusive")
+    try:
+        assert _zolit_status(Config(zolit_db=db), check=True).state == "unavailable"
+    finally:
+        writer.rollback()
+        writer.close()

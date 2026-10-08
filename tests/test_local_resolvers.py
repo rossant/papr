@@ -178,6 +178,46 @@ def test_zolit_database_search(tmp_path: Path):
     assert zolit.by_doi("10.1000/JENNY", cfg).local_pdf == str(pdf)
 
 
+def test_zolit_group_scope_and_library_provenance(tmp_path):
+    db = tmp_path / "index #1.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.executescript("""
+            create table items (item_key text, title text, year text, creators_json text,
+                doi text, zotero_json text);
+        """)
+        for key, metadata in [
+            ("GROUP", {"group_id": 5593385, "library_id": 8}),
+            ("OTHER", {"group_id": 12345, "library_id": 9}),
+            ("PERSONAL", {"library_id": 1}),
+            ("LEGACY", {}),
+        ]:
+            conn.execute(
+                "insert into items values (?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    "Jenny paper",
+                    "2006",
+                    '[{"last_name":"Jenny"}]',
+                    "10.1000/jenny",
+                    json.dumps({"item_type": "journalArticle", **metadata}),
+                ),
+            )
+    cfg = Config(zolit_db=db, zotero_group_id=5593385)
+    with resolution_session():
+        matches = zolit.search("Jenny 2006", cfg)
+        assert len(matches) == 1
+        assert matches[0].source_key == "GROUP"
+        assert matches[0].source_library == "group:5593385"
+        assert zolit.by_doi("10.1000/jenny", cfg).source_key == "GROUP"
+        cfg.zotero_group_id = 12345
+        assert zolit.by_doi("10.1000/jenny", cfg).source_key == "OTHER"
+        cfg.zotero_group_id = 98765
+        assert zolit.by_doi("10.1000/jenny", cfg) is None
+        assert zolit.search("Jenny 2006", cfg) == []
+        cfg.zotero_group_id = None
+        assert len(zolit.search("Jenny 2006", cfg)) == 4
+
+
 def test_zolit_sbs_seed_parser(tmp_path: Path):
     repo = tmp_path / "zolit-sbs"
     domain = repo / "domains" / "sbs"
@@ -220,6 +260,7 @@ def test_zolit_sbs_structured_references_override_legacy_seeds(tmp_path):
     assert result[0].item_type == "paper-conference"
     assert result[0].doi == "10.1000/jenny"
     assert result[0].source_key == "seed"
+    assert zolit_sbs.by_doi("10.1000/JENNY", Config(zolit_sbs_repo=tmp_path)).source_key == "seed"
 
 
 def test_invalid_structured_seeds_do_not_silently_use_markdown(tmp_path):
@@ -397,6 +438,7 @@ def test_zotero_group_api_scopes_metadata_and_attachment_requests(tmp_path, monk
     config.zotero_group_id = 5593385
     results = zotero.search_api("Jenny paper", config)
     assert len(results) == 1 and results[0].local_pdf == str(pdf)
+    assert results[0].source_library == "group:5593385"
     base = f"{config.zotero_api_url}/groups/5593385/items"
     assert requested == [f"{base}/top", f"{base}/PARENT/children", f"{base}/PDF/file/view/url"]
 
@@ -416,7 +458,7 @@ def test_zotero_group_sqlite_is_scoped_and_read_only(tmp_path):
     assert [article.title for article in result] == ["SBS Jenny paper"]
     assert result[0].local_pdf == str(tmp_path / "storage" / "ATTACH8" / "paper.pdf")
     assert result[0].source_key == "PARENT8"
-    assert result[0].source_library == "library:8"
+    assert result[0].source_library == "group:5593385"
     assert zotero.by_doi("10.1000/JENNY", config).title == "SBS Jenny paper"
     assert path.read_bytes() == original
 
