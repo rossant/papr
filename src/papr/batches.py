@@ -47,18 +47,26 @@ def _has_exports(row: dict) -> bool:
     )
 
 
-def save_manifest(rows: list[dict], config: Config, path: Path | None = None) -> Path:
+def save_manifest(
+    rows: list[dict], config: Config, path: Path | None = None, name: str | None = None
+) -> Path:
     destination = path or config.data_dir / "batches" / f"{uuid4().hex}.json"
     destination = destination.expanduser().resolve()
+    payload = {
+        "schema": "papr-export-batch",
+        "version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "items": rows,
+    }
+    if name is not None:
+        payload["name"] = name
     atomic_json(
         destination,
-        {
-            "schema": "papr-export-batch",
-            "version": 1,
-            "created_at": datetime.now(UTC).isoformat(),
-            "items": rows,
-        },
+        payload,
     )
+    from .batch_catalog import register_manifest
+
+    register_manifest(destination, config, name=name)
     return destination
 
 

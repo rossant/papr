@@ -113,7 +113,9 @@ def test_dry_run_has_no_files_history_or_new_manifest(tmp_path, config):
     assert cli.main(["batch", "export", str(manifest), "-o", str(output), "--dry-run"]) == 0
     assert not output.exists()
     assert not (config.data_dir / "latest-download.json").exists()
-    assert not (config.data_dir / "batches").exists()
+    assert list((config.data_dir / "batches").glob("*.json")) == [
+        config.data_dir / "batches" / ".catalog.json"
+    ]
 
 
 @pytest.mark.parametrize("bad_name", ["../escape.pdf", "/escape.pdf", "..", "bad\\name.pdf"])
