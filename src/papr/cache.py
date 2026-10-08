@@ -2,29 +2,20 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
 import re
 import stat
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from .config import Config
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _CATEGORIES = ("artifacts", "pdf", "processors", "recovered")
-
-
-def _has_symlink_component(path: Path) -> bool:
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
-        current /= part
-        try:
-            if stat.S_ISLNK(current.lstat().st_mode):
-                return True
-        except FileNotFoundError:
-            return False
-    return False
 
 
 def _tree_size(path: Path) -> int:
@@ -132,60 +123,105 @@ def prune(
     """Remove only old, unreferenced flat artifact objects; return selected paths."""
     if not math.isfinite(older_than_days) or older_than_days < 0:
         raise ValueError("--older-than must be zero or greater")
-    root = config.cache_dir.expanduser().absolute()
-    artifacts_dir = root / "artifacts"
-    if _has_symlink_component(artifacts_dir):
-        raise ValueError(f"Cannot safely prune cache through a symlink: {artifacts_dir}")
-    try:
-        if stat.S_ISLNK(root.lstat().st_mode):
-            raise ValueError(f"Cannot safely prune cache through symlink: {root}")
-    except FileNotFoundError:
-        return []
-    try:
-        if not stat.S_ISDIR(artifacts_dir.lstat().st_mode):
-            return []
-    except FileNotFoundError:
-        return []
-
-    # Resolve all protection records before looking at deletion candidates. Any
-    # missing/corrupt known record blocks the complete prune operation.
-    references = _referenced(config, manifests or [])
-    cutoff = time.time() - older_than_days * 86400
-    selected: list[Path] = []
-    selected_stats = {}
-    for candidate in artifacts_dir.iterdir():
-        if not _DIGEST.fullmatch(candidate.name):
-            continue
-        try:
-            before = candidate.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(before.st_mode) or candidate.name in references:
-            continue
-        if before.st_mtime > cutoff:
-            continue
-        selected.append(candidate)
-        selected_stats[candidate] = before
-
     if dry_run:
-        return selected
-    removed: list[Path] = []
-    for candidate in selected:
-        # Revalidate immediately before unlinking. The age grace period protects
-        # normal atomic writers; inode/mtime checks avoid deleting a replacement.
+        lock = nullcontext()
+    else:
+        from .locking import state_lock
+
+        lock = state_lock(config)
+    with lock:
+        return _prune_locked(
+            config,
+            dry_run=dry_run,
+            manifests=manifests or [],
+            older_than_days=older_than_days,
+        )
+
+
+def _open_directory_nofollow(path: Path) -> int | None:
+    """Open a directory by walking every component without following symlinks."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ValueError("Safe cache pruning requires O_NOFOLLOW and O_DIRECTORY support")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    current_fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                os.close(current_fd)
+                return None
+            except OSError as exc:
+                if exc.errno in {errno.ENOTDIR, errno.ELOOP}:
+                    raise ValueError(
+                        f"Cannot safely prune through non-directory or symlink: {path}"
+                    ) from exc
+                raise
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
         try:
-            current = candidate.lstat()
-            initial = selected_stats[candidate]
-            if (
-                stat.S_ISREG(current.st_mode)
-                and current.st_ino == initial.st_ino
-                and current.st_dev == initial.st_dev
-                and current.st_mtime == initial.st_mtime
-                and current.st_mtime <= cutoff
-                and candidate.name not in references
-            ):
-                candidate.unlink()
-                removed.append(candidate)
-        except (OSError, StopIteration):
-            continue
-    return removed
+            os.close(current_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _prune_locked(
+    config: Config,
+    *,
+    dry_run: bool,
+    manifests: list[Path],
+    older_than_days: float,
+) -> list[Path]:
+    root = Path(os.path.abspath(config.cache_dir.expanduser()))
+    artifacts_dir = root / "artifacts"
+    fd = _open_directory_nofollow(artifacts_dir)
+    if fd is None:
+        return []
+    try:
+        # Resolve all protection records before looking at deletion candidates.
+        # Any missing/corrupt known record blocks the complete prune operation.
+        references = _referenced(config, manifests)
+        cutoff = time.time() - older_than_days * 86400
+        selected: list[tuple[str, os.stat_result]] = []
+        try:
+            names = os.listdir(fd)
+        except OSError as exc:
+            raise ValueError(f"Cannot safely read artifact cache {artifacts_dir}: {exc}") from exc
+        for name in names:
+            if not _DIGEST.fullmatch(name):
+                continue
+            try:
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(before.st_mode) or name in references:
+                continue
+            if before.st_mtime > cutoff:
+                continue
+            selected.append((name, before))
+
+        selected_paths = [artifacts_dir / name for name, _ in selected]
+        if dry_run:
+            return selected_paths
+        removed: list[Path] = []
+        for name, initial in selected:
+            try:
+                current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if (
+                    stat.S_ISREG(current.st_mode)
+                    and current.st_ino == initial.st_ino
+                    and current.st_dev == initial.st_dev
+                    and current.st_mtime_ns == initial.st_mtime_ns
+                    and current.st_mtime <= cutoff
+                    and name not in references
+                ):
+                    os.unlink(name, dir_fd=fd)
+                    removed.append(artifacts_dir / name)
+            except OSError:
+                continue
+        return removed
+    finally:
+        os.close(fd)

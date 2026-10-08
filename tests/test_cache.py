@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -142,6 +143,74 @@ def test_symlink_escape_is_ignored_and_prune_does_not_delete_target(config, tmp_
     assert outside.read_bytes() == b"external data"
 
 
+def test_artifact_directory_swap_cannot_redirect_unlink(config, tmp_path, monkeypatch):
+    cached = orphan(config, b"inside cache")
+    external = tmp_path / "external"
+    external.mkdir()
+    external_target = external / cached.name
+    external_target.write_bytes(b"external content")
+    old = time.time() - 10 * 86400
+    os.utime(external_target, (old, old))
+    artifacts_dir = config.cache_dir / "artifacts"
+    moved_dir = config.cache_dir / "artifacts-held"
+
+    def swap_after_open(_config, _manifests):
+        artifacts_dir.rename(moved_dir)
+        artifacts_dir.symlink_to(external, target_is_directory=True)
+        return set()
+
+    monkeypatch.setattr("papr.cache._referenced", swap_after_open)
+    removed = prune(config, older_than_days=1)
+    assert removed == [artifacts_dir / cached.name]
+    assert not (moved_dir / cached.name).exists()
+    assert external_target.read_bytes() == b"external content"
+
+
+def test_prune_holds_shared_state_lock_through_deletion(config, tmp_path, monkeypatch):
+    from papr.artifacts import remember
+
+    candidate = orphan(config)
+    source = tmp_path / "active-source.pdf"
+    source.write_bytes(b"old orphan")
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+
+    def writer():
+        writer_started.set()
+        remember(source, config)
+        writer_finished.set()
+
+    def references(_config, _manifests):
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert writer_started.wait(2)
+        assert not writer_finished.wait(0.1)
+        return set()
+
+    monkeypatch.setattr("papr.cache._referenced", references)
+    removed = prune(config, older_than_days=1)
+    assert removed == [candidate]
+    assert writer_finished.wait(2)
+    assert candidate.read_bytes() == source.read_bytes()
+
+
+def test_dangling_catalog_and_history_symlinks_fail_closed(config):
+    candidate = orphan(config)
+    catalog = config.data_dir / "batches" / ".catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.symlink_to(config.data_dir / "missing-catalog.json")
+    with pytest.raises(ValueError, match="catalog|catalogue|registry"):
+        prune(config, older_than_days=1)
+    assert candidate.exists()
+
+    catalog.unlink()
+    history = config.data_dir / "latest-download.json"
+    history.symlink_to(config.data_dir / "missing-history.json")
+    with pytest.raises(ValueError, match="latest-download history"):
+        prune(config, older_than_days=1)
+    assert candidate.exists()
+
+
 def test_dry_run_reports_without_mutation_and_cli_json(config, capsys):
     candidate = orphan(config)
     selected = prune(config, dry_run=True, older_than_days=1)
@@ -151,6 +220,7 @@ def test_dry_run_reports_without_mutation_and_cli_json(config, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["categories"]["artifacts"] == len(b"old orphan")
     assert candidate.exists()
+    assert not (config.data_dir / ".state.lock").exists()
 
 
 def test_recent_orphan_uses_age_grace(config):
