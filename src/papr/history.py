@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
-import tempfile
 from dataclasses import fields
 from pathlib import Path
 
+from .artifacts import atomic_copy, atomic_json, locate, remember
 from .config import Config
 from .model import Article, Person
 
@@ -39,27 +38,8 @@ def record_download(article: Article, pdf: Path, config: Config) -> None:
         "sha256": _pdf_hash(pdf),
         "article": article.to_dict(),
     }
-    config.data_dir.mkdir(parents=True, exist_ok=True)
-    destination = config.data_dir / _HISTORY_NAME
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=config.data_dir,
-            prefix=".latest-download-",
-            suffix=".tmp",
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(destination)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    remember(pdf, config)
+    atomic_json(config.data_dir / _HISTORY_NAME, payload)
 
 
 def _article(data: object) -> Article:
@@ -131,6 +111,17 @@ def load_latest(config: Config) -> tuple[Article, Path]:
         pdf = Path(stored_path)
     except (ValueError, TypeError, KeyError) as exc:
         raise ValueError("Invalid latest-download history; download a paper again") from exc
+    if not pdf.exists():
+        try:
+            pdf = locate(pdf, digest, config)
+        except ValueError as exc:
+            raise ValueError("The latest downloaded PDF is missing; download it again") from exc
+        if pdf.name != Path(stored_path).name:
+            # Zotero attachment imports should retain the original human-readable filename.
+            recovered = config.cache_dir / "recovered" / digest / Path(stored_path).name
+            if not recovered.is_file() or _pdf_hash(recovered) != digest:
+                atomic_copy(pdf, recovered, overwrite=True)
+            pdf = recovered
     if _pdf_hash(pdf) != digest:
         raise ValueError("The latest downloaded PDF has changed; download it again")
     return article, pdf

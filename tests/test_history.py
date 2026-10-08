@@ -11,6 +11,7 @@ from papr.model import Article, Person
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "data_dir", property(lambda self: tmp_path / "data"))
+    monkeypatch.setattr(Config, "cache_dir", property(lambda self: tmp_path / "cache"))
     return Config(download_dir=tmp_path / "Downloads")
 
 
@@ -56,7 +57,7 @@ def test_malformed_history_has_clear_error(config, value):
         load_latest(config)
 
 
-@pytest.mark.parametrize("change", ["missing", "modified", "not-pdf"])
+@pytest.mark.parametrize("change", ["modified", "not-pdf"])
 def test_recorded_file_must_still_match(tmp_path, config, change):
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.7\nfirst")
@@ -68,6 +69,33 @@ def test_recorded_file_must_still_match(tmp_path, config, change):
     else:
         pdf.write_text("HTML error page")
     with pytest.raises(ValueError, match="missing|changed|no longer a PDF"):
+        load_latest(config)
+
+
+def test_missing_export_recovers_exact_content_from_cache(tmp_path, config):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nfirst")
+    record_download(Article("First"), pdf, config)
+    pdf.rename(tmp_path / "renamed.pdf")
+    article, recovered = load_latest(config)
+    assert article.title == "First"
+    assert recovered.read_bytes() == b"%PDF-1.7\nfirst"
+    assert recovered.name == "paper.pdf"
+    assert recovered.is_relative_to(config.cache_dir / "recovered")
+
+
+def test_legacy_history_recovers_move_to_downloads_by_checksum(tmp_path, config):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nfirst")
+    record_download(Article("First"), pdf, config)
+    for cached in (config.cache_dir / "artifacts").iterdir():
+        cached.unlink()
+    config.download_dir.mkdir()
+    destination = config.download_dir / pdf.name
+    pdf.rename(destination)
+    assert load_latest(config)[1] == destination
+    destination.write_bytes(b"%PDF-1.7\nwrong")
+    with pytest.raises(ValueError, match="missing"):
         load_latest(config)
 
 
