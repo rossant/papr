@@ -54,6 +54,14 @@ SOURCE_TYPES = {
     "article": "article-journal",
     "book": "book",
     "conference-paper": "paper-conference",
+    "dataset": "dataset",
+    "report": "report",
+    "report-component": "report",
+    "standard": "standard",
+    "reference-entry": "entry",
+    "review": "article",
+    "editorial": "article",
+    "erratum": "article",
     "other": "document",
 }
 

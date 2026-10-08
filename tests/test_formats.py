@@ -3,6 +3,7 @@ import json
 import pytest
 
 from papr.formats import bib, csl
+from papr.item_types import from_source
 from papr.model import Article, Person
 
 
@@ -79,3 +80,18 @@ def test_merge_fills_unknown_type_without_overriding_known_type():
     assert article.item_type == "book"
     article.merge(Article(title="Conflicting remote", item_type="article-journal"))
     assert article.item_type == "book"
+
+
+@pytest.mark.parametrize(
+    "source_type,expected",
+    [
+        ("journal-article", "article-journal"),
+        ("proceedings-article", "paper-conference"),
+        ("posted-content", "article"),
+        ("report", "report"),
+        ("dataset", "dataset"),
+        ("unknown-new-type", "document"),
+    ],
+)
+def test_remote_publication_type_mapping(source_type, expected):
+    assert from_source(source_type) == expected
