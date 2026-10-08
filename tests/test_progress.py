@@ -80,7 +80,9 @@ def test_diagnostics_do_not_interpret_markup(capsys):
     assert "[private]" in capsys.readouterr().err
 
 
-def test_live_resume_keeps_preceding_result_visible():
+def test_live_resume_keeps_preceding_result_visible(monkeypatch):
+    # This test simulates an interactive terminal even when CI inherits TERM=dumb.
+    monkeypatch.setenv("TERM", "xterm-256color")
     output = io.StringIO()
     reporter = progress.Reporter(live=True)
     reporter.console = Console(file=output, force_terminal=True, width=100)
