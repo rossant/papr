@@ -626,9 +626,11 @@ compatible dependency ranges in `pyproject.toml`; Zolit and zolit-sbs remain
 optional local integrations rather than runtime package dependencies. Update
 the lock deliberately with `uv lock --upgrade`, then rerun the checks above.
 
-CI tests Python 3.11 and 3.13 on Linux and macOS. A separate job checks the latest
-Zolit main branch using synthetic indexes written by Zolit itself. Run those
-contract checks with a sibling checkout:
+CI tests Python 3.11 and 3.13 on Linux and macOS. Zolit's CI has a separate job
+that checks its current checkout against public Papr main, using synthetic
+indexes written by Zolit itself. Hosting that job in the private Zolit
+repository avoids needing a credential for Papr to access it. Run those
+contract checks locally with a sibling checkout:
 
 ```bash
 uv pip install -e ../zolit
