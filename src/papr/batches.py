@@ -48,25 +48,58 @@ def _has_exports(row: dict) -> bool:
 
 
 def save_manifest(
-    rows: list[dict], config: Config, path: Path | None = None, name: str | None = None
+    rows: list[dict],
+    config: Config,
+    path: Path | None = None,
+    name: str | None = None,
+    *,
+    output_dir: Path | None = None,
 ) -> Path:
+    if name is not None and (
+        not isinstance(name, str)
+        or not name.strip()
+        or name != name.strip()
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+    ):
+        raise ValueError("Batch name must be a non-empty label, not a path")
+    if output_dir is not None and "\x00" in str(output_dir):
+        raise ValueError("Batch output directory contains an invalid NUL character")
     destination = path or config.data_dir / "batches" / f"{uuid4().hex}.json"
     destination = destination.expanduser().resolve()
-    payload = {
-        "schema": "papr-export-batch",
-        "version": 1,
-        "created_at": datetime.now(UTC).isoformat(),
-        "items": rows,
-    }
-    if name is not None:
-        payload["name"] = name
-    atomic_json(
-        destination,
-        payload,
-    )
-    from .batch_catalog import register_manifest
+    from .locking import state_lock
 
-    register_manifest(destination, config, name=name)
+    with state_lock(config):
+        previous_id = None
+        previous_output_dir = None
+        if destination.is_file():
+            try:
+                previous = json.loads(destination.read_text(encoding="utf-8"))
+                if isinstance(previous, dict) and isinstance(previous.get("id"), str):
+                    previous_id = previous["id"]
+                if isinstance(previous, dict) and isinstance(previous.get("output_dir"), str):
+                    previous_output_dir = previous["output_dir"]
+            except (OSError, ValueError, TypeError):
+                pass
+        payload = {
+            "schema": "papr-export-batch",
+            "version": 1,
+            "id": previous_id or uuid4().hex,
+            "created_at": datetime.now(UTC).isoformat(),
+            "items": rows,
+        }
+        if name is not None:
+            payload["name"] = name
+        if output_dir is not None:
+            payload["output_dir"] = str(output_dir.expanduser().resolve())
+        elif previous_output_dir is not None:
+            payload["output_dir"] = previous_output_dir
+        atomic_json(destination, payload)
+        from .batch_catalog import register_manifest
+
+        register_manifest(destination, config, name=name, manifest_id=payload["id"])
     return destination
 
 
@@ -79,6 +112,18 @@ def load_manifest(path: Path) -> dict:
             or type(data.get("version")) is not int
             or data["version"] != 1
             or not isinstance(data.get("items"), list)
+            or (
+                "id" in data
+                and (not isinstance(data["id"], str) or not data["id"] or "\x00" in data["id"])
+            )
+            or (
+                "output_dir" in data
+                and (
+                    not isinstance(data["output_dir"], str)
+                    or "\x00" in data["output_dir"]
+                    or not Path(data["output_dir"]).is_absolute()
+                )
+            )
         ):
             raise ValueError("unsupported manifest schema")
         for row in data["items"]:
@@ -151,6 +196,7 @@ def export_batch(
     exclude: list[Path] | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    resume: bool = False,
 ) -> list[dict]:
     """Preflight every checksum before copying; identical destinations are reused."""
     data = load_manifest(manifest)
@@ -161,6 +207,14 @@ def export_batch(
             continue
         available = [*original.get("artifacts", []), *original.get("pending_artifacts", [])]
         if not (_has_exports(original) or original.get("pending_artifacts")) or not available:
+            if resume and original["status"] == "error":
+                row = dict(original)
+                row.update(
+                    export_status="error",
+                    error=row.get("error")
+                    or "No saved artifacts; this item needs resolution again",
+                )
+                plan.append((row, None))
             continue
         row = dict(original)
         article = _article(row["article"])
@@ -172,16 +226,31 @@ def export_batch(
             row.pop("pending_artifacts", None)
             plan.append((row, []))
             continue
-        files = [
-            (artifact, locate(Path(artifact["path"]), artifact["sha256"], config))
-            for artifact in available
-        ]
+        try:
+            files = [
+                (artifact, locate(Path(artifact["path"]), artifact["sha256"], config))
+                for artifact in available
+            ]
+        except (OSError, ValueError) as exc:
+            if not resume:
+                raise
+            row.update(
+                status="error",
+                export_status="partial" if row.get("artifacts") else "error",
+                error=str(exc),
+                outputs=[artifact["path"] for artifact in row.get("artifacts", [])],
+            )
+            plan.append((row, None))
+            continue
         plan.append((row, files))
 
     output = output.expanduser().resolve()
     rows = []
     reserved: dict[Path, str] = {}
     for row, files in plan:
+        if files is None:
+            rows.append(row)
+            continue
         if row["status"] == "excluded":
             rows.append(row)
             continue

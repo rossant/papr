@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from pypdf import PdfWriter
@@ -229,10 +230,25 @@ def test_mid_copy_failure_records_partial_manifest_and_can_retry(tmp_path, confi
     assert len(row["artifacts"]) == len(row["pending_artifacts"]) == 1
     assert (output / "paper.pdf").read_bytes() == pdf.read_bytes()
     monkeypatch.setattr(shutil, "copyfile", original)
+    assert cli.main(["batch", "resume", str(partial)]) == 0
     rows = export_batch(partial, output, config)
     assert rows[0]["status"] == "ok"
     assert not rows[0].get("pending_artifacts")
     assert len(list(output.iterdir())) == 2
+
+
+def test_resume_preserves_unresolved_failures_without_artifacts(tmp_path, config, capsys):
+    manifest = save_manifest(
+        [{"status": "error", "input": "unresolved", "failed_stage": "resolve"}],
+        config,
+        tmp_path / "unresolved.json",
+    )
+    assert cli.main(["batch", "resume", str(manifest)]) == 1
+    output = capsys.readouterr().out
+    saved_path = Path(output.split("Batch manifest: ", 1)[1].strip())
+    row = load_manifest(saved_path)["items"][0]
+    assert row["status"] == "error"
+    assert "No saved artifacts" in row["error"]
 
 
 def test_dry_run_reserves_collisions_like_real_export(tmp_path, config):

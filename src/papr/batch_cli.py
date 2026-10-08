@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .artifacts import locate
-from .batch_catalog import list_manifests, resolve_manifest
+from .batch_catalog import list_manifests, manifest_summary, resolve_manifest
 from .batches import export_batch, load_manifest, save_manifest
 from .config import Config
 
@@ -27,7 +27,7 @@ def run(argv: list[str], config: Config) -> int:
             command.add_argument("--dry-run", action="store_true")
             command.add_argument("--manifest", type=Path, dest="new_manifest")
             command.add_argument("--name", help="name the saved result batch")
-            command.add_argument("--exclude-delivered", type=Path, action="append", default=[])
+            command.add_argument("--exclude-delivered", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         if args.action == "list":
@@ -41,6 +41,7 @@ def run(argv: list[str], config: Config) -> int:
                     label = f"{batch['name']} ({batch['id']})" if batch.get("name") else batch["id"]
                     print(
                         f"{label}: {batch['available']} available, {batch['missing']} missing, "
+                        f"{batch['changed']} changed, {batch['unreadable']} unreadable, "
                         f"{batch['incomplete']} incomplete of {batch['total']} item(s) — "
                         f"{batch['path']}"
                     )
@@ -54,27 +55,19 @@ def run(argv: list[str], config: Config) -> int:
             )
         elif args.action == "summary":
             data = load_manifest(resolve_manifest(args.manifest, config))
-            items = data["items"]
-            available = sum(
-                bool(row.get("artifacts") or row.get("pending_artifacts")) for row in items
-            )
-            missing = sum(
-                row.get("status") == "error"
-                and not (row.get("artifacts") or row.get("pending_artifacts"))
-                for row in items
-            )
-            incomplete = sum(
-                row.get("status") == "error" or row.get("export_status") == "partial"
-                for row in items
-            )
+            summary = manifest_summary(data, config)
             print(
-                f"Batch {data.get('name') or Path(args.manifest).name}: {available} available, "
-                f"{missing} missing, {incomplete} incomplete of {len(items)} item(s)."
+                f"Batch {data.get('name') or Path(args.manifest).name}: "
+                f"{summary['available']} available, {summary['missing']} missing, "
+                f"{summary['changed']} changed, {summary['unreadable']} unreadable, "
+                f"{summary['incomplete']} incomplete of {summary['total']} item(s)."
             )
-            for row in items:
-                state = row.get("export_status") or row["status"]
-                title = row.get("article", {}).get("title") or row.get("input") or "Untitled item"
-                print(f"  {state}: {title}")
+            for item in summary["items"]:
+                print(
+                    f"  {item['availability']}: {item['title']} "
+                    f"({item['available_artifacts']}/{item['total_artifacts']} artifacts; "
+                    f"{item['status']})"
+                )
         elif args.action == "check":
             checked = 0
             for row in load_manifest(resolve_manifest(args.manifest, config))["items"]:
@@ -85,13 +78,20 @@ def run(argv: list[str], config: Config) -> int:
                         checked += 1
             print(f"{checked} artifact(s) verified")
         else:
+            manifest_path = resolve_manifest(args.manifest, config)
+            data = load_manifest(manifest_path)
+            output = args.output
+            if output is None and args.action == "resume":
+                output = _resume_output(data, config)
+            output = output or config.download_dir
             rows = export_batch(
-                resolve_manifest(args.manifest, config),
-                args.output or config.download_dir,
+                manifest_path,
+                output,
                 config,
-                exclude=[resolve_manifest(path, config) for path in args.exclude_delivered],
+                exclude=[resolve_manifest(value, config) for value in args.exclude_delivered],
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
+                resume=args.action == "resume",
             )
             for row in rows:
                 if row["status"] == "error":
@@ -101,12 +101,31 @@ def run(argv: list[str], config: Config) -> int:
                 for path in row.get("outputs", []) if row["status"] != "excluded" else []:
                     print(f"✓ {path}")
             if not args.dry_run:
-                print(
-                    "Batch manifest: "
-                    f"{save_manifest(rows, config, args.new_manifest, name=args.name)}"
+                saved_manifest = save_manifest(
+                    rows,
+                    config,
+                    args.new_manifest,
+                    name=args.name or data.get("name"),
+                    output_dir=output,
                 )
+                print(f"Batch manifest: {saved_manifest}")
             return 1 if any(row["status"] == "error" for row in rows) else 0
         return 0
     except (ValueError, OSError, KeyError) as exc:
         print(f"✗ Batch: {exc}", file=sys.stderr)
         return 1
+
+
+def _resume_output(data: dict, config: Config) -> Path:
+    stored = data.get("output_dir")
+    if stored:
+        return Path(stored)
+    output_paths = [
+        Path(artifact["path"]).parent
+        for row in data["items"]
+        for artifact in row.get("artifacts", [])
+        if row.get("status") == "error"
+    ]
+    if output_paths:
+        return output_paths[0]
+    return config.download_dir
