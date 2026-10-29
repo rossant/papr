@@ -10,7 +10,7 @@ from ..config import Config
 from ..model import Article
 from ..progress import _current, emit
 from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
-from .common import deduplicate, extract_doi, extract_pmid, is_local_pdf
+from .common import deduplicate, extract_doi, extract_pmid, is_local_pdf, local_metadata_config
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +127,19 @@ def resolve(
     use_remote: bool = True,
     enrich: bool = False,
 ) -> list[Article]:
+    # A hosted Zotero API is an external fallback, after all offline libraries.
+    offline_config = local_metadata_config(config)
     doi = extract_doi(query)
     if doi:
-        local = _local_by_doi(doi, config) if use_local and config.local_sources else []
+        local = _local_by_doi(doi, offline_config) if use_local and config.local_sources else []
+        if (
+            use_local
+            and config.local_sources
+            and use_remote
+            and offline_config is not config
+            and (enrich or not any(is_local_pdf(article.local_pdf) for article in local))
+        ):
+            local = deduplicate([*local, *_local_by_doi(doi, config)])
         if not use_remote:
             return local
         if not enrich and any(is_local_pdf(a.local_pdf) for a in local):
@@ -166,7 +176,15 @@ def resolve(
 
     local: list[Article] = []
     if use_local and config.local_sources:
-        local = _local_search(query, config)
+        local = _local_search(query, offline_config)
+        if (
+            use_remote
+            and offline_config is not config
+            and (enrich or not (_strong_local(local, config) and is_local_pdf(local[0].local_pdf)))
+        ):
+            local = deduplicate([*local, *_local_search(query, config)])
+            local.sort(key=lambda article: article.score or 0.0, reverse=True)
+            local = local[: config.max_candidates]
         if not use_remote:
             return local
         if _strong_local(local, config):

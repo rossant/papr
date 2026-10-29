@@ -447,3 +447,123 @@ def test_supplied_article_keeps_its_pdf_after_enrichment(tmp_path, monkeypatch, 
     result, _ = materialize_article(supplied, Config(), enrich=True)
     assert result.abstract == "Metadata"
     assert result.local_pdf == str(supplied_pdf)
+
+
+@pytest.mark.parametrize("query", ["10.1000/jenny", "pmid:123456", "Jenny 2006"])
+def test_all_offline_sources_precede_hosted_zotero(tmp_path, monkeypatch, query):
+    import httpx
+
+    from papr.resolvers import zotero
+
+    pdf = tmp_path / "zolit.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    zolit_article = _jenny("Known locally")
+    zolit_article.pmid = "123456"
+    zolit_article.source = "zolit"
+    zolit_article.local_pdf = str(pdf)
+    requests = []
+
+    def get(client, url, **kwargs):
+        requests.append(url)
+        raise AssertionError("Offline sources must be checked before the hosted Zotero API")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [])
+    monkeypatch.setattr(
+        resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi, lambda *args: zolit_article)
+    )
+    monkeypatch.setattr(
+        resolvers, "LOCAL_PMID_LOOKUPS", (zotero.by_pmid, lambda *args: zolit_article)
+    )
+    monkeypatch.setattr(
+        resolvers, "LOCAL_SEARCHERS", (zotero.search, lambda *args: [zolit_article])
+    )
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: requests.append("crossref"))
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: requests.append("openalex"))
+    monkeypatch.setattr(resolvers.pubmed, "by_pmid", lambda *args: requests.append("pubmed"))
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: requests.append("search") or [])
+    config = Config(zotero_api_url="https://zotero.example.org/api")
+    result = resolvers.resolve(query, config)
+    assert result == [zolit_article]
+    assert result[0].local_pdf == str(pdf)
+    assert requests == []
+    assert config.zotero_api_url == "https://zotero.example.org/api"
+
+
+@pytest.mark.parametrize("query", ["10.1000/jenny", "Jenny 2006"])
+@pytest.mark.parametrize(
+    "pdf_valid,enrich,use_remote,expect_hosted",
+    [
+        (False, False, True, True),
+        (True, True, True, True),
+        (False, False, False, False),
+        (False, True, False, False),
+        (True, True, False, False),
+    ],
+)
+def test_hosted_zotero_fallback_is_available_after_offline_preflight(
+    tmp_path, monkeypatch, query, pdf_valid, enrich, use_remote, expect_hosted
+):
+    import httpx
+
+    from papr.resolvers import zotero
+
+    pdf = tmp_path / "zolit.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n" if pdf_valid else b"not a PDF")
+    local_article = _jenny("Known locally")
+    local_article.local_pdf = str(pdf)
+    requests = []
+
+    def get(client, url, **kwargs):
+        requests.append(url)
+        data = [
+            {
+                "data": {
+                    "title": "Known locally",
+                    "DOI": "10.1000/jenny",
+                    "date": "2006",
+                    "creators": [{"creatorType": "author", "lastName": "Jenny"}],
+                    "abstractNote": "Hosted metadata",
+                }
+            }
+        ]
+        return httpx.Response(200, json=data, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [])
+    monkeypatch.setattr(
+        resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi, lambda *args: local_article)
+    )
+    monkeypatch.setattr(
+        resolvers, "LOCAL_SEARCHERS", (zotero.search, lambda *args: [local_article])
+    )
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: None)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: None)
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: [])
+    config = Config(zotero_api_url="https://zotero.example.org/api")
+    result = resolvers.resolve(query, config, enrich=enrich, use_remote=use_remote)
+    assert bool(requests) is expect_hosted
+    assert len(result) == 1
+    assert result[0].abstract == ("Hosted metadata" if expect_hosted else None)
+    assert config.zotero_api_url == "https://zotero.example.org/api"
+
+
+def test_ambiguous_offline_pdf_does_not_bypass_hosted_metadata_lookup(tmp_path, monkeypatch):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    first = _jenny("First paper", "10.1000/first")
+    first.local_pdf = str(pdf)
+    second = _jenny("Second paper", "10.1000/second")
+    second.score = first.score - 0.01
+    seen = []
+
+    def search(query, config):
+        seen.append(config.zotero_api_url)
+        return [first, second]
+
+    monkeypatch.setattr(resolvers, "_local_search", search)
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: [])
+    config = Config(zotero_api_url="https://zotero.example.org/api")
+    result = resolvers.resolve("Jenny 2006", config)
+    assert result == [first, second]
+    assert seen == ["", config.zotero_api_url]

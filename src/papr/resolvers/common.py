@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Iterable
+from copy import copy
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from rapidfuzz.fuzz import ratio, token_set_ratio
 
+from ..config import Config
 from ..model import Article
 
 DOI_RE = re.compile(
@@ -15,6 +19,28 @@ DOI_RE = re.compile(
 PMID_RE = re.compile(r"(?:pmid:\s*)?(\d{5,10})$", re.I)
 YEAR_RE = re.compile(r"\b(18|19|20|21)\d{2}\b")
 WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
+
+
+def local_metadata_config(config: Config) -> Config:
+    """Keep desktop Zotero available without contacting hosted Zotero services."""
+    try:
+        parsed = urlsplit(config.zotero_api_url)
+        host = parsed.hostname or ""
+        loopback = host.rstrip(".").lower() == "localhost"
+        if not loopback:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                pass
+        if loopback and parsed.scheme in {"http", "https"}:
+            return config
+    except ValueError:
+        pass
+    if not config.zotero_api_url:
+        return config
+    local_config = copy(config)
+    local_config.zotero_api_url = ""
+    return local_config
 
 
 def is_local_pdf(value: str | Path | None) -> bool:
