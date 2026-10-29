@@ -60,19 +60,36 @@ def materialize_article(
         supplied_pdf = is_local_pdf(item.local_pdf)
         if not enrich and supplied_pdf:
             return item, None
-        if item.doi:
-            richer = resolve(
-                item.doi, config, use_local=use_local, use_remote=use_remote, **options
+        identifier = item.doi or (f"pmid:{item.pmid}" if item.pmid else None)
+        if not identifier and (not use_local or not config.local_sources or not item.title.strip()):
+            return item, None
+        query = identifier or " ".join(
+            part
+            for part in (
+                item.first_creator if item.authors else "",
+                str(item.year) if item.year else "",
+                item.title,
             )
-            if richer:
-                try:
-                    enriched = select_candidate(item.doi, richer, config)
-                except LookupError:
-                    return item, None
-                enriched.merge(item)
-                if supplied_pdf:
-                    enriched.local_pdf = item.local_pdf
-                return enriched, None
+            if part
+        )
+        # Identifierless imports retain their supplied metadata unless a confident
+        # local match exists; importing them never opts into online metadata search.
+        richer = resolve(
+            query,
+            config,
+            use_local=use_local,
+            use_remote=use_remote if identifier else False,
+            **options,
+        )
+        if richer:
+            try:
+                enriched = select_candidate(query, richer, config)
+            except LookupError:
+                return item, None
+            enriched.merge(item)
+            if supplied_pdf:
+                enriched.local_pdf = item.local_pdf
+            return enriched, None
         return item, None
     if isinstance(item, Path):
         return article_from_pdf(

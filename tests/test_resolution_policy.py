@@ -567,3 +567,101 @@ def test_ambiguous_offline_pdf_does_not_bypass_hosted_metadata_lookup(tmp_path, 
     result = resolvers.resolve("Jenny 2006", config)
     assert result == [first, second]
     assert seen == ["", config.zotero_api_url]
+
+
+@pytest.mark.parametrize("identifier", ["pmid", "none"])
+def test_imported_article_finds_local_pdf_without_external_calls(tmp_path, monkeypatch, identifier):
+    import httpx
+
+    from papr.input import materialize_article
+    from papr.resolvers import zotero
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    supplied = Article("Known locally", authors=[Person(family="Jenny")], year=2006)
+    if identifier == "pmid":
+        supplied.pmid = "123456"
+    local_article = _jenny("Known locally")
+    local_article.pmid = "123456"
+    local_article.local_pdf = str(pdf)
+    requests = []
+
+    def get(client, url, **kwargs):
+        requests.append(url)
+        raise AssertionError("Imported article's local PDF must precede online metadata")
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [local_article])
+    monkeypatch.setattr(resolvers, "LOCAL_PMID_LOOKUPS", (zotero.by_pmid,))
+    monkeypatch.setattr(resolvers, "LOCAL_SEARCHERS", (zotero.search,))
+    monkeypatch.setattr(resolvers.pubmed, "by_pmid", lambda *args: requests.append("pubmed"))
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: requests.append("remote") or [])
+    config = Config(zotero_api_url="https://zotero.example.org/api")
+    result, _ = materialize_article(supplied, config)
+    assert result.local_pdf == str(pdf)
+    assert result.doi == "10.1000/jenny"
+    assert requests == []
+
+
+@pytest.mark.parametrize("candidates", ["missing", "ambiguous", "weak"])
+def test_identifierless_import_preserves_input_without_confident_local_match(
+    monkeypatch, candidates
+):
+    from papr.input import materialize_article
+
+    supplied = Article("Known locally", authors=[Person(family="Jenny")], year=2006)
+    first = _jenny("Known locally")
+    second = _jenny("Another paper", doi="10.1000/other")
+    second.score = first.score
+    result = [] if candidates == "missing" else [first, second]
+    if candidates == "weak":
+        first.score = 0.1
+        result = [first]
+    calls = []
+
+    def resolve(query, config, **options):
+        calls.append(options)
+        return result
+
+    monkeypatch.setattr(resolvers, "resolve", resolve)
+    assert materialize_article(supplied, Config(), enrich=True) == (supplied, None)
+    assert calls == [{"use_local": True, "use_remote": False, "enrich": True}]
+
+
+@pytest.mark.parametrize(
+    "use_local,use_remote,enrich",
+    [
+        (True, False, False),
+        (False, True, False),
+        (True, True, True),
+    ],
+)
+def test_imported_pmid_preserves_resolution_flags(monkeypatch, use_local, use_remote, enrich):
+    from papr.input import materialize_article
+
+    supplied = Article("Supplied", pmid="123456")
+    calls = []
+
+    def resolve(query, config, **options):
+        calls.append((query, options))
+        return []
+
+    monkeypatch.setattr(resolvers, "resolve", resolve)
+    assert materialize_article(
+        supplied, Config(), use_local=use_local, use_remote=use_remote, enrich=enrich
+    ) == (supplied, None)
+    expected = {"use_local": use_local, "use_remote": use_remote}
+    if enrich:
+        expected["enrich"] = True
+    assert calls == [("pmid:123456", expected)]
+
+
+def test_identifierless_import_respects_disabled_local_sources(monkeypatch):
+    from papr.input import materialize_article
+
+    supplied = Article("Supplied")
+    calls = []
+    monkeypatch.setattr(resolvers, "resolve", lambda *args, **kwargs: calls.append(kwargs))
+    assert materialize_article(supplied, Config(), use_local=False) == (supplied, None)
+    assert materialize_article(supplied, Config(local_sources=False)) == (supplied, None)
+    assert calls == []
