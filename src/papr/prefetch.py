@@ -59,6 +59,7 @@ class Prefetch:
         self.candidates: dict[Path, set[tuple]] = {}
         self.fallbacks: dict[Future, tuple[Path, str] | Exception] = {}
         self.fallback_durations: dict[Future, float] = {}
+        self.successful_fallbacks: dict[Path, tuple[tuple[Path, str], float]] = {}
         self.staged_paths: dict[Future, Path] = {}
         self.cache_paths: dict[Future, Path] = {}
 
@@ -103,7 +104,11 @@ class Prefetch:
                             )
                             previous = self.futures.get(key)
                             seen = self.candidates.setdefault(key, set())
-                            if previous is not None and signature not in seen:
+                            if (
+                                previous is not None
+                                and signature not in seen
+                                and key not in self.successful_fallbacks
+                            ):
                                 # A different representation can expose a useful PDF
                                 # URL. Serialize only this rare duplicate case so two
                                 # workers never replace the same cache concurrently.
@@ -181,7 +186,10 @@ class Prefetch:
                     pass
                 else:
                     return self._available_result(latest, result)
-            if future not in self.fallbacks:
+            cached_fallback = self.successful_fallbacks.get(self.cache_paths[future])
+            if cached_fallback is not None:
+                self.fallbacks[future], self.fallback_durations[future] = cached_fallback
+            elif future not in self.fallbacks:
                 started = perf_counter()
                 try:
                     self.fallbacks[future] = self._ucl(prepared.article, ucl_fetch, show_browser)
@@ -189,6 +197,10 @@ class Prefetch:
                     self.fallbacks[future] = exc
                 finally:
                     self.fallback_durations[future] = perf_counter() - started
+                if isinstance(self.fallbacks[future], tuple):
+                    self.successful_fallbacks[self.cache_paths[future]] = (
+                        self.fallbacks[future], self.fallback_durations[future]
+                    )
             result = self.fallbacks[future]
             if isinstance(result, Exception):
                 raise result from None

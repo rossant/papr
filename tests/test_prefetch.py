@@ -491,3 +491,35 @@ def test_cli_later_duplicate_with_new_pdf_url_succeeds(config, monkeypatch, tmp_
     assert [row["status"] for row in rows] == ["error", "ok", "ok"]
     assert Path(rows[1]["outputs"][0]).read_bytes() == b"%PDF-later-candidate"
     assert calls == [None, "working.pdf"]
+
+
+def test_different_failed_candidates_share_successful_browser_acquisition(config, monkeypatch):
+    from papr.fetchers import fetch_pdf, oa
+
+    calls = []
+    browser_calls = []
+
+    def prepare(item):
+        return Article("Same", doi="10.1000/same", oa_pdf_url=item), None, True
+
+    def failed_oa(article, destination, config):
+        calls.append(article.oa_pdf_url)
+        return None
+
+    def browser(article, destination, config):
+        browser_calls.append(article.oa_pdf_url)
+        destination.write_bytes(b"%PDF-one-browser-acquisition")
+        return "ucl"
+
+    monkeypatch.setattr(oa, "fetch", failed_oa)
+    with Prefetch(
+        ["first.pdf", "second.pdf", "third.pdf"], prepare, fetch_pdf,
+        config, jobs=2, refresh=True,
+    ) as pool:
+        for prepared in pool:
+            path, source = pool.result(prepared, allow_ucl=True, ucl_fetch=browser)
+            assert source == "ucl"
+            assert path.read_bytes() == b"%PDF-one-browser-acquisition"
+            pool.release(prepared)
+    assert calls == ["first.pdf", "second.pdf"]
+    assert browser_calls == ["first.pdf"]
