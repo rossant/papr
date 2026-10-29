@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from papr import resolvers
@@ -312,3 +314,136 @@ def test_concurrent_provider_failure_keeps_successful_sibling(monkeypatch):
     result = resolvers.resolve("10.1000/example", Config(), use_local=False)
     assert sorted(calls) == ["crossref", "openalex"]
     assert [article.title for article in result] == ["Available"]
+
+
+@pytest.mark.parametrize("query", ["10.1000/jenny", "pmid:123456", "Jenny 2006"])
+def test_later_valid_pdf_survives_local_deduplication(tmp_path, monkeypatch, query):
+    invalid = tmp_path / "invalid.pdf"
+    invalid.write_text("not a PDF")
+    valid = tmp_path / "valid.pdf"
+    valid.write_bytes(b"%PDF-1.7\n")
+    earlier = _jenny("Known locally")
+    earlier.pmid = "123456"
+    earlier.local_pdf = str(invalid)
+    later = _jenny("Known locally")
+    later.pmid = "123456"
+    later.local_pdf = str(valid)
+    calls = []
+    lookups = (lambda *args: earlier, lambda *args: later)
+    monkeypatch.setattr(resolvers, "LOCAL_DOI_LOOKUPS", lookups)
+    monkeypatch.setattr(resolvers, "LOCAL_PMID_LOOKUPS", lookups)
+    monkeypatch.setattr(
+        resolvers,
+        "LOCAL_SEARCHERS",
+        (
+            lambda *args: [earlier],
+            lambda *args: [later],
+        ),
+    )
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: calls.append("crossref"))
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: calls.append("openalex"))
+    monkeypatch.setattr(resolvers.pubmed, "by_pmid", lambda *args: calls.append("pubmed"))
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: calls.append("search") or [])
+    result = resolvers.resolve(query, Config())
+    assert len(result) == 1
+    assert result[0] is earlier
+    assert result[0].local_pdf == str(valid)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "api_url,enrich,expect_api",
+    [
+        ("https://zotero.example.org/api", False, False),
+        ("https://zotero.example.org/api", True, True),
+        ("http://localhost:23119/api", False, True),
+        ("http://127.0.0.1:23119/api", False, True),
+        ("http://[::1]:23119/api", False, True),
+    ],
+)
+def test_supplied_pdf_limits_zotero_to_desktop_unless_enrich(
+    tmp_path, monkeypatch, api_url, enrich, expect_api
+):
+    import httpx
+    from pypdf import PdfWriter
+
+    from papr.input import materialize_article
+    from papr.resolvers import zotero
+
+    pdf = tmp_path / "paper.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_metadata({"/Subject": "doi:10.1000/jenny"})
+    writer.write(pdf)
+    calls = []
+
+    def get(client, url, **kwargs):
+        calls.append(url)
+        if not expect_api:
+            raise AssertionError("Hosted Zotero API must not be contacted for a supplied PDF")
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi,))
+    monkeypatch.setattr(resolvers, "LOCAL_SEARCHERS", (zotero.search,))
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: None)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: None)
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: [])
+    # Nonexistent explicit directory prevents discovering a developer's real library.
+    config = Config(zotero_api_url=api_url, zotero_data_dir=tmp_path / "no-library")
+    article, source = materialize_article(pdf, config, enrich=enrich)
+    assert article.doi == "10.1000/jenny"
+    assert source == pdf
+    assert bool(calls) is expect_api
+    assert config.zotero_api_url == api_url
+
+
+def test_supplied_pdf_config_copy_preserves_local_paths_and_subclass_state(tmp_path, monkeypatch):
+    from pypdf import PdfWriter
+
+    from papr import local
+
+    class CustomConfig(Config):
+        @property
+        def custom_property(self):
+            return "available"
+
+    config = CustomConfig(
+        zotero_api_url="https://zotero.example.org/api",
+        zotero_data_dir=Path("relative-zotero"),
+        zolit_db=Path("relative-zolit.sqlite"),
+    )
+    config.extra_state = object()
+    pdf = tmp_path / "paper.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.write(pdf)
+    seen = []
+    monkeypatch.setattr(local, "resolve", lambda query, cfg, **opts: seen.append(cfg) or [])
+    local.article_from_pdf(pdf, config)
+    assert seen
+    for copied in seen:
+        assert copied is not config
+        assert isinstance(copied, CustomConfig)
+        assert copied.custom_property == "available"
+        assert copied.extra_state is config.extra_state
+        assert copied.zotero_api_url == ""
+        assert copied.zotero_data_dir == Path("relative-zotero")
+        assert copied.zolit_db == Path("relative-zolit.sqlite")
+    assert config.zotero_api_url == "https://zotero.example.org/api"
+
+
+@pytest.mark.parametrize("other_pdf_valid", [False, True])
+def test_supplied_article_keeps_its_pdf_after_enrichment(tmp_path, monkeypatch, other_pdf_valid):
+    from papr.input import materialize_article
+
+    supplied_pdf = tmp_path / "supplied.pdf"
+    supplied_pdf.write_bytes(b"%PDF-1.7\n")
+    other_pdf = tmp_path / "other.pdf"
+    other_pdf.write_bytes(b"%PDF-1.7\n" if other_pdf_valid else b"not a PDF")
+    supplied = Article("Supplied", doi="10.1000/jenny", local_pdf=str(supplied_pdf))
+    enriched = Article("Enriched", doi=supplied.doi, local_pdf=str(other_pdf), abstract="Metadata")
+    monkeypatch.setattr(resolvers, "resolve", lambda *args, **kwargs: [enriched])
+    result, _ = materialize_article(supplied, Config(), enrich=True)
+    assert result.abstract == "Metadata"
+    assert result.local_pdf == str(supplied_pdf)

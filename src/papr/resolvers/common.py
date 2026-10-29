@@ -123,6 +123,13 @@ def deduplicate(articles: Iterable[Article]) -> list[Article]:
             None,
         )
         if duplicate is not None:
+            # An invalid earlier attachment must not hide a usable later copy.
+            if (
+                article.local_pdf != duplicate.local_pdf
+                and is_local_pdf(article.local_pdf)
+                and not is_local_pdf(duplicate.local_pdf)
+            ):
+                duplicate.local_pdf = article.local_pdf
             duplicate.merge(article)
             if (article.score or 0) > (duplicate.score or 0):
                 duplicate.score = article.score

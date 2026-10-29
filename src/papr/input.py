@@ -57,7 +57,8 @@ def materialize_article(
     options = {"enrich": True} if enrich else {}
 
     if isinstance(item, Article):
-        if not enrich and is_local_pdf(item.local_pdf):
+        supplied_pdf = is_local_pdf(item.local_pdf)
+        if not enrich and supplied_pdf:
             return item, None
         if item.doi:
             richer = resolve(
@@ -69,6 +70,8 @@ def materialize_article(
                 except LookupError:
                     return item, None
                 enriched.merge(item)
+                if supplied_pdf:
+                    enriched.local_pdf = item.local_pdf
                 return enriched, None
         return item, None
     if isinstance(item, Path):
