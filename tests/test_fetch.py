@@ -135,3 +135,91 @@ def test_show_browser_requests_visible_institutional_browser(tmp_path, monkeypat
     monkeypatch.setattr(ucl, "fetch", institutional_fetch)
     assert fetch_pdf(Article("Paper"), tmp_path / "output.pdf", config, show_browser=True) == "ucl"
     assert seen == [False]
+
+
+@pytest.mark.parametrize("source", ["oa", "pmc"])
+def test_direct_sources_do_not_look_up_unpaywall(tmp_path, monkeypatch, config, source):
+    def unexpected(*args):
+        pytest.fail("Unpaywall must be lazy")
+
+    monkeypatch.setattr(oa, "_unpaywall_url", unexpected)
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"%PDF-1.7\ndirect")
+    )))
+    article = Article(title="Paper", doi="10.1234/paper")
+    if source == "oa":
+        article.oa_pdf_url = "https://example.org/paper.pdf"
+    else:
+        article.pmcid = "123"
+    destination = tmp_path / "paper.pdf"
+    assert oa.fetch(article, destination, config)
+    assert destination.read_bytes() == b"%PDF-1.7\ndirect"
+
+
+def test_unpaywall_runs_after_direct_failure(tmp_path, monkeypatch, config):
+    calls = []
+
+    def unpaywall(*args):
+        calls.append("unpaywall")
+        return "https://example.org/discovered.pdf"
+
+    def respond(request):
+        calls.append(request.url.path)
+        return httpx.Response(404) if request.url.path == "/direct.pdf" else httpx.Response(
+            200, content=b"%PDF-1.7\ndiscovered"
+        )
+
+    monkeypatch.setattr(oa, "_unpaywall_url", unpaywall)
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    assert oa.fetch(
+        Article(title="Paper", oa_pdf_url="https://example.org/direct.pdf"),
+        tmp_path / "paper.pdf", config,
+    )
+    assert calls == ["/direct.pdf", "unpaywall", "/discovered.pdf"]
+
+
+def test_partial_pdf_failure_preserves_destination_and_cleans_temp(tmp_path, monkeypatch, config):
+    class BrokenBody(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"%PDF-1.7\npartial"
+            raise httpx.ReadError("interrupted")
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=BrokenBody())
+    )))
+    destination = tmp_path / "paper.pdf"
+    destination.write_bytes(b"%PDF-1.7\nold")
+    assert oa.fetch(
+        Article(title="Paper", oa_pdf_url="https://example.org/paper.pdf"), destination, config
+    ) is None
+    assert destination.read_bytes() == b"%PDF-1.7\nold"
+    assert list(tmp_path.glob("*.oa.pdf")) == []
+
+
+def test_pdf_streams_to_disk_without_returning_full_body(tmp_path, monkeypatch):
+    content = b"%PDF-1.7\n" + b"x" * 100_000
+
+    class Body(httpx.SyncByteStream):
+        def __iter__(self):
+            for offset in range(0, len(content), 1000):
+                yield content[offset:offset + 1000]
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=Body())
+    )))
+    destination = tmp_path / "streamed.pdf"
+    result = oa._download("https://example.org/paper.pdf", destination)
+    assert result[0] == b"%PDF-"
+    assert destination.read_bytes() == content
+
+
+def test_expired_item_deadline_stops_before_network(tmp_path, monkeypatch, config):
+    from papr.http import http_deadline
+
+    monkeypatch.setattr(oa, "http_deadline", lambda: http_deadline(0))
+    monkeypatch.setattr(oa, "client", lambda: pytest.fail("deadline must prevent network requests"))
+    assert oa.fetch(
+        Article(title="Paper", doi="10.1234/paper", oa_pdf_url="https://example.org/paper.pdf"),
+        tmp_path / "paper.pdf", config,
+    ) is None
+    assert list(tmp_path.iterdir()) == []
