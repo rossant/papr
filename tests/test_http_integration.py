@@ -3,6 +3,7 @@
 import threading
 
 import httpx
+import pytest
 
 from papr import cli, http
 from papr.config import Config
@@ -43,3 +44,19 @@ def test_cli_reuses_one_client_until_workers_finish(tmp_path, monkeypatch):
     assert clients[0].is_closed
     assert sorted(requests) == ["/one.pdf", "/two.pdf"]
     assert len(list(config.download_dir.glob("*.pdf"))) == 2
+
+
+@pytest.mark.parametrize("options", [[], ["--dry-run"], ["--rename"]])
+def test_local_commands_do_not_initialize_http(tmp_path, monkeypatch, options):
+    local = tmp_path / "input.pdf"
+    local.write_bytes(b"%PDF-1.7\nlocal paper")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-ca.pem"))
+    monkeypatch.setattr(cli, "_resolve_item", lambda *a, **kw: (Article("Local"), local))
+
+    def unexpected_client():
+        raise AssertionError("Local processing must not initialize an HTTP client")
+
+    monkeypatch.setattr(http, "_new_client", unexpected_client)
+    args = cli._get_parser().parse_args([str(local), "--quiet", *options])
+    config = Config(download_dir=tmp_path / "out", pdf_compress=False)
+    assert cli._run_get(args, config) == 0
