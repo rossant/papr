@@ -112,3 +112,44 @@ def test_stream_failure_releases_host_slot():
         with pytest.raises(httpx.ReadError):
             c.get("https://one.test")
         assert c.get("https://one.test").content == b"ok"
+
+
+def test_environment_proxy_and_no_proxy_keep_limits_and_retries(monkeypatch):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.test:8080")
+    monkeypatch.setenv("NO_PROXY", "direct.test")
+    routes = []
+    sleeps = []
+    proxied_calls = 0
+
+    def direct(request):
+        routes.append(("direct", request.url.host))
+        return httpx.Response(200)
+
+    def proxy(request):
+        nonlocal proxied_calls
+        routes.append(("proxy", request.url.host))
+        proxied_calls += 1
+        return httpx.Response(503 if proxied_calls == 1 else 200, headers={"retry-after": "1"})
+
+    monkeypatch.setattr(
+        httpx.Client, "_init_transport", lambda self, **kw: httpx.MockTransport(direct)
+    )
+    monkeypatch.setattr(
+        httpx.Client, "_init_proxy_transport", lambda self, *a, **kw: httpx.MockTransport(proxy)
+    )
+    monkeypatch.setattr(http.time, "sleep", sleeps.append)
+    with http._new_client() as c:
+        assert c.get("http://proxied.test").status_code == 200
+        assert c.get("http://direct.test").status_code == 200
+        direct_transport = c._transport_for_url(httpx.URL("http://direct.test"))
+        proxy_transport = c._transport_for_url(httpx.URL("http://proxied.test"))
+        assert isinstance(direct_transport, http._PoliteTransport)
+        assert isinstance(proxy_transport, http._PoliteTransport)
+        assert direct_transport.limits is proxy_transport.limits
+    assert routes == [
+        ("proxy", "proxied.test"), ("proxy", "proxied.test"), ("direct", "direct.test")
+    ]
+    assert sleeps == [1]

@@ -56,20 +56,32 @@ class _LimitedStream(httpx.SyncByteStream):
                 self.release()
 
 
-class _PoliteTransport(httpx.BaseTransport):
-    """Limit active bodies per host, including redirects and streaming requests."""
-
-    def __init__(self, transport: httpx.BaseTransport | None = None, *, per_host: int = 2):
-        self.transport = transport or httpx.HTTPTransport()
+class _HostLimits:
+    def __init__(self, per_host: int = 2):
         self.per_host = per_host
         self.lock = threading.Lock()
         self.hosts: dict[str, threading.BoundedSemaphore] = {}
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
+    def semaphore(self, host: str) -> threading.BoundedSemaphore:
         with self.lock:
-            semaphore = self.hosts.setdefault(
-                request.url.host, threading.BoundedSemaphore(self.per_host)
-            )
+            return self.hosts.setdefault(host, threading.BoundedSemaphore(self.per_host))
+
+
+class _PoliteTransport(httpx.BaseTransport):
+    """Limit active bodies per host, including redirects and streaming requests."""
+
+    def __init__(
+        self,
+        transport: httpx.BaseTransport | None = None,
+        *,
+        per_host: int = 2,
+        limits: _HostLimits | None = None,
+    ):
+        self.transport = transport or httpx.HTTPTransport()
+        self.limits = limits or _HostLimits(per_host)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        semaphore = self.limits.semaphore(request.url.host)
         # Each request has a finite retry budget even outside an item deadline.
         retry_deadline = time.monotonic() + remaining_time()
         for attempt in range(3):
@@ -120,12 +132,27 @@ class _PoliteTransport(httpx.BaseTransport):
         self.transport.close()
 
 
+class _PoliteClient(httpx.Client):
+    def __init__(self, **kwargs):
+        self._host_limits = _HostLimits()
+        super().__init__(**kwargs)
+
+    # Let httpx discover proxies and NO_PROXY normally, then wrap every route.
+    # These two initialization hooks are covered by the environment-proxy test.
+    def _init_transport(self, **kwargs):
+        return _PoliteTransport(super()._init_transport(**kwargs), limits=self._host_limits)
+
+    def _init_proxy_transport(self, *args, **kwargs):
+        return _PoliteTransport(
+            super()._init_proxy_transport(*args, **kwargs), limits=self._host_limits
+        )
+
+
 def _new_client() -> httpx.Client:
-    return httpx.Client(
+    return _PoliteClient(
         follow_redirects=True,
         timeout=httpx.Timeout(30.0, connect=15.0),
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
-        transport=_PoliteTransport(),
     )
 
 
