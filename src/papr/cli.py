@@ -6,7 +6,7 @@ import logging
 import shutil
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from time import perf_counter
 
@@ -47,6 +47,16 @@ def _diagnostics(verbose: bool):
         handler.close()
         logger.setLevel(previous_level)
         logger.propagate = previous_propagate
+
+
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("jobs must be a positive integer") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("jobs must be a positive integer")
+    return number
 
 
 def _formats(value: str) -> list[str]:
@@ -155,6 +165,10 @@ def _get_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--show-browser", action="store_true", help="show Chrome during institutional PDF retrieval"
     )
+    p.add_argument(
+        "--jobs", type=_positive_int, help="concurrent OA fetches (default: config jobs, 4); "
+        "interactive, dry-run and rename runs are sequential"
+    )
     p.add_argument("--refresh", action="store_true", help="ignore cached PDF")
     p.add_argument("--overwrite", action="store_true", help="replace existing outputs")
     p.add_argument(
@@ -232,6 +246,7 @@ def _config_init(config: Config) -> int:
         (
             'download_dir = "~/Downloads"\n'
             'formats = ["pdf"]\n'
+            'jobs = 4\n'
             '# email = "you@example.org"\n'
             '# unpaywall_email = "you@example.org"\n'
             '# openalex_api_key = "..."\n\n'
@@ -353,179 +368,218 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                 }
             )
 
-    reporter.start_batch(len(items))
-    for item in items:
-        label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
-        row: dict = {"input": label}
-        reporter.start_item(label)
-        try:
-            emit("resolve", "Resolving reference")
-            article, local_pdf = _resolve_item(
-                item,
-                config,
-                interactive,
-                use_local=use_local,
-                use_remote=use_remote,
-                **({"enrich": True} if args.enrich else {}),
-            )
-            row["article"] = article.to_dict()
-            row["identity"] = identity(article)
-            if args.item_type and article.item_type not in args.item_type:
-                row.update(
-                    status="excluded", exclusion_reason=f"document type: {article.item_type}"
-                )
-                with pause():
-                    print(f"− {_article_line(article)} — document type: {article.item_type}")
-                continue
-            if identities(article) & excluded:
-                row.update(status="excluded", exclusion_reason="already delivered")
-                with pause():
-                    print(f"− {_article_line(article)} — already delivered")
-                continue
-            row["doi"] = article.doi
-            row["title"] = article.title
-            reporter.label = _article_line(article)
-            row["resolver"] = article.source
-            local_formats = list(formats)
-            local_output = output_dir
-            if args.rename:
-                emit("export", "Planning rename" if args.dry_run else "Renaming local PDF")
-                if local_pdf is None:
-                    raise ValueError("--rename is only valid for a local PDF input")
-                base = basename(article, config, args.filename)
-                destination = local_pdf.with_name(f"{base}.pdf")
-                if destination.resolve() != local_pdf.resolve():
-                    if destination.exists() and not args.overwrite:
-                        from .filename import collision_safe_path
+    from .prefetch import Prefetch
 
-                        destination = collision_safe_path(destination)
+    needs_pdf = args.zotero or bool({"pdf", "md", "txt"} & set(formats))
+
+    def prepare(item):
+        emit("resolve", "Resolving reference")
+        article, local_pdf = _resolve_item(
+            item, config, interactive, use_local=use_local, use_remote=use_remote,
+            **({"enrich": True} if args.enrich else {}),
+        )
+        excluded_item = (args.item_type and article.item_type not in args.item_type) or bool(
+            identities(article) & excluded
+        )
+        return article, local_pdf, needs_pdf and not excluded_item
+
+    jobs = args.jobs or config.jobs
+    concurrent = jobs > 1 and not (interactive or args.dry_run or args.rename)
+    pool = Prefetch(items, prepare, fetch_pdf, config, jobs=jobs, refresh=args.refresh)
+    with pool if concurrent else nullcontext() as prefetch:
+        work_items = prefetch if prefetch is not None else items
+        reporter.start_batch(len(items))
+        for prepared in work_items:
+            item = prepared.item if prefetch is not None else prepared
+            label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
+            row: dict = {"input": label}
+            reporter.start_item(label)
+            try:
+                emit("resolve", "Resolving reference")
+                if prefetch is not None:
+                    if prepared.error is not None:
+                        prepared.events.replay()
+                        raise prepared.error
+                    article, local_pdf = prepared.article, prepared.local_pdf
+                    prepared.events.replay()
+                else:
+                    article, local_pdf = _resolve_item(
+                        item,
+                        config,
+                        interactive,
+                        use_local=use_local,
+                        use_remote=use_remote,
+                        **({"enrich": True} if args.enrich else {}),
+                    )
+                row["article"] = article.to_dict()
+                row["identity"] = identity(article)
+                if args.item_type and article.item_type not in args.item_type:
+                    row.update(
+                        status="excluded", exclusion_reason=f"document type: {article.item_type}"
+                    )
+                    with pause():
+                        print(f"− {_article_line(article)} — document type: {article.item_type}")
+                    continue
+                if identities(article) & excluded:
+                    row.update(status="excluded", exclusion_reason="already delivered")
+                    with pause():
+                        print(f"− {_article_line(article)} — already delivered")
+                    continue
+                row["doi"] = article.doi
+                row["title"] = article.title
+                reporter.label = _article_line(article)
+                row["resolver"] = article.source
+                local_formats = list(formats)
+                local_output = output_dir
+                if args.rename:
+                    emit("export", "Planning rename" if args.dry_run else "Renaming local PDF")
+                    if local_pdf is None:
+                        raise ValueError("--rename is only valid for a local PDF input")
+                    base = basename(article, config, args.filename)
+                    destination = local_pdf.with_name(f"{base}.pdf")
+                    if destination.resolve() != local_pdf.resolve():
+                        if destination.exists() and not args.overwrite:
+                            from .filename import collision_safe_path
+
+                            destination = collision_safe_path(destination)
+                        if not args.dry_run:
+                            if args.overwrite:
+                                local_pdf.replace(destination)
+                            else:
+                                local_pdf.rename(destination)
+                    with pause():
+                        print(f"✓ {destination}")
+                    row.update(
+                        status="dry-run" if args.dry_run else "ok",
+                        source="local",
+                        outputs=[str(destination)],
+                    )
                     if not args.dry_run:
-                        if args.overwrite:
-                            local_pdf.replace(destination)
+                        row.update(
+                            record_artifacts(article, [destination], config), export_status="ok"
+                        )
+                        from .history import record_download
+
+                        record_download(article, destination, config)
+                    continue
+                base = basename(article, config, args.filename)
+                if args.dry_run:
+                    emit("export", "Planning outputs")
+                    planned = [
+                        str(local_output / f"{base}{output_suffix(f, local_formats)}")
+                        for f in local_formats
+                    ]
+                    with pause():
+                        print(f"✓ {_article_line(article)}")
+                        for path in planned:
+                            print(f"  {path}")
+                    row.update(status="dry-run", outputs=planned)
+                    continue
+
+                needs_pdf = args.zotero or bool({"pdf", "md", "txt"} & set(local_formats))
+                with tempfile.TemporaryDirectory(prefix="papr-") as td:
+                    if local_pdf is not None:
+                        emit("fetch", "Using local PDF")
+                        pdf = local_pdf
+                        source = "local"
+                    elif needs_pdf:
+                        emit("fetch", "Fetching PDF")
+                        pdf = Path(td) / "paper.pdf"
+                        if prefetch is not None:
+                            pdf, source = prefetch.result(
+                                prepared, allow_ucl=not args.oa_only, ucl_fetch=ucl.fetch,
+                                show_browser=args.show_browser,
+                            )
                         else:
-                            local_pdf.rename(destination)
-                with pause():
-                    print(f"✓ {destination}")
-                row.update(
-                    status="dry-run" if args.dry_run else "ok",
-                    source="local",
-                    outputs=[str(destination)],
-                )
-                if not args.dry_run:
-                    row.update(record_artifacts(article, [destination], config), export_status="ok")
-                    from .history import record_download
+                            source = fetch_pdf(
+                                article,
+                                pdf,
+                                config,
+                                allow_ucl=not args.oa_only,
+                                refresh=args.refresh,
+                                show_browser=args.show_browser,
+                            )
+                    else:
+                        pdf = Path(td) / "unused.pdf"
+                        source = "metadata"
+                    prepared_pdf = pdf
+                    if "pdf" in local_formats or args.zotero:
+                        from .compression import compress_pdf
 
-                    record_download(article, destination, config)
-                continue
-            base = basename(article, config, args.filename)
-            if args.dry_run:
-                emit("export", "Planning outputs")
-                planned = [
-                    str(local_output / f"{base}{output_suffix(f, local_formats)}")
-                    for f in local_formats
-                ]
-                with pause():
-                    print(f"✓ {_article_line(article)}")
-                    for path in planned:
-                        print(f"  {path}")
-                row.update(status="dry-run", outputs=planned)
-                continue
-
-            needs_pdf = args.zotero or bool({"pdf", "md", "txt"} & set(local_formats))
-            with tempfile.TemporaryDirectory(prefix="papr-") as td:
-                if local_pdf is not None:
-                    emit("fetch", "Using local PDF")
-                    pdf = local_pdf
-                    source = "local"
-                elif needs_pdf:
-                    emit("fetch", "Fetching PDF")
-                    pdf = Path(td) / "paper.pdf"
-                    source = fetch_pdf(
+                        prepared_pdf, row["compression"] = compress_pdf(
+                            pdf, config, enabled=False if args.no_compress else None
+                        )
+                    emit("export", "Preparing outputs")
+                    export_options = {}
+                    if "pdf" in local_formats:
+                        export_options["pdf_output"] = prepared_pdf
+                    outputs, processor_used = export_outputs(
                         article,
                         pdf,
+                        local_formats,
+                        local_output,
                         config,
-                        allow_ucl=not args.oa_only,
-                        refresh=args.refresh,
-                        show_browser=args.show_browser,
+                        filename_template=args.filename,
+                        processor=args.processor,
+                        overwrite=args.overwrite,
+                        **export_options,
                     )
-                else:
-                    pdf = Path(td) / "unused.pdf"
-                    source = "metadata"
-                prepared_pdf = pdf
-                if "pdf" in local_formats or args.zotero:
-                    from .compression import compress_pdf
+                    row.update(
+                        status="ok",
+                        source=source,
+                        processor=processor_used,
+                        outputs=[str(path) for path in outputs],
+                    )
+                    row.update(record_artifacts(article, outputs, config), export_status="ok")
+                    exported_pdf = next((path for path in outputs if path.suffix == ".pdf"), None)
+                    if exported_pdf is not None:
+                        from .history import record_download
 
-                    prepared_pdf, row["compression"] = compress_pdf(
-                        pdf, config, enabled=False if args.no_compress else None
-                    )
-                emit("export", "Preparing outputs")
-                export_options = {}
-                if "pdf" in local_formats:
-                    export_options["pdf_output"] = prepared_pdf
-                outputs, processor_used = export_outputs(
-                    article,
-                    pdf,
-                    local_formats,
-                    local_output,
-                    config,
-                    filename_template=args.filename,
-                    processor=args.processor,
-                    overwrite=args.overwrite,
-                    **export_options,
-                )
+                        record_download(article, exported_pdf, config)
+                    if args.zotero:
+                        from .zotero import save
+
+                        upload_pdf = exported_pdf or prepared_pdf
+                        if exported_pdf is None:
+                            upload_pdf = Path(td) / f"{base}.pdf"
+                            if prepared_pdf.resolve() != upload_pdf.resolve():
+                                shutil.copy2(prepared_pdf, upload_pdf)
+                        row["zotero"] = save(
+                            article,
+                            upload_pdf,
+                            config,
+                            collection=args.collection,
+                            interactive=interactive,
+                        )
+                joined = ", ".join(str(x) for x in outputs)
+                with pause():
+                    print(f"✓ {article.first_creator} {article.year or ''} — {joined}")
+                    if row.get("zotero"):
+                        saved = row["zotero"]
+                        target = saved.get("library") or "My Library"
+                        if saved.get("collection"):
+                            target += f" / {saved['collection']}"
+                        print(f"✓ Zotero: {saved['status']} — {target}")
                 row.update(
                     status="ok",
                     source=source,
                     processor=processor_used,
-                    outputs=[str(path) for path in outputs],
+                    outputs=[str(x) for x in outputs],
                 )
-                row.update(record_artifacts(article, outputs, config), export_status="ok")
-                exported_pdf = next((path for path in outputs if path.suffix == ".pdf"), None)
-                if exported_pdf is not None:
-                    from .history import record_download
-
-                    record_download(article, exported_pdf, config)
-                if args.zotero:
-                    from .zotero import save
-
-                    upload_pdf = exported_pdf or prepared_pdf
-                    if exported_pdf is None:
-                        upload_pdf = Path(td) / f"{base}.pdf"
-                        if prepared_pdf.resolve() != upload_pdf.resolve():
-                            shutil.copy2(prepared_pdf, upload_pdf)
-                    row["zotero"] = save(
-                        article,
-                        upload_pdf,
-                        config,
-                        collection=args.collection,
-                        interactive=interactive,
-                    )
-            joined = ", ".join(str(x) for x in outputs)
-            with pause():
-                print(f"✓ {article.first_creator} {article.year or ''} — {joined}")
-                if row.get("zotero"):
-                    saved = row["zotero"]
-                    target = saved.get("library") or "My Library"
-                    if saved.get("collection"):
-                        target += f" / {saved['collection']}"
-                    print(f"✓ Zotero: {saved['status']} — {target}")
-            row.update(
-                status="ok",
-                source=source,
-                processor=processor_used,
-                outputs=[str(x) for x in outputs],
-            )
-        except Exception as exc:
-            failures += 1
-            logging.getLogger(__name__).debug("Processing failed: %s", label, exc_info=True)
-            with pause():
-                print(f"✗ {label}: {exc}", file=sys.stderr)
-                for path in row.get("outputs", []):
-                    print(f"  Saved: {path}", file=sys.stderr)
-            row.update(status="error", error=str(exc))
-        finally:
-            row.update(reporter.finish_item(row.get("status", "error")))
-            report.append(row)
+            except Exception as exc:
+                failures += 1
+                logging.getLogger(__name__).debug("Processing failed: %s", label, exc_info=True)
+                with pause():
+                    print(f"✗ {label}: {exc}", file=sys.stderr)
+                    for path in row.get("outputs", []):
+                        print(f"  Saved: {path}", file=sys.stderr)
+                row.update(status="error", error=str(exc))
+            finally:
+                row.update(reporter.finish_item(row.get("status", "error")))
+                if prefetch is not None:
+                    row["timings"].update(prefetch.timings(prepared))
+                    row["duration"] = round(perf_counter() - prepared.started, 3)
+                report.append(row)
 
     reporter.summary(failures, output_dir)
     if args.report:

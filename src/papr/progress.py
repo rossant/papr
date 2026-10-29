@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from threading import Lock
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -16,7 +17,7 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
-_current: ContextVar[Reporter | None] = ContextVar("papr_reporter", default=None)
+_current: ContextVar[Reporter | EventBuffer | None] = ContextVar("papr_reporter", default=None)
 STAGES = ("resolve", "fetch", "compress", "process", "export", "zotero")
 
 
@@ -41,6 +42,47 @@ def pause():
     else:
         with reporter.pause():
             yield
+
+
+class EventBuffer:
+    """Collect one item's events without mutating the terminal reporter in a worker.
+
+    The coordinator drains events while waiting for a worker. Frequent updates
+    are coalesced and the backlog is bounded, including for large downloads.
+    """
+
+    def __init__(self):
+        self.events: list[tuple[str, str, dict]] = []
+        self.lock = Lock()
+        self.duration = 0.0
+
+    @contextmanager
+    def capture(self):
+        token = _current.set(self)
+        try:
+            yield self
+        finally:
+            _current.reset(token)
+
+    def event(self, stage, detail, **measurement):
+        with self.lock:
+            event = (stage, detail, measurement)
+            if self.events and self.events[-1][:2] == event[:2]:
+                self.events[-1] = event
+            else:
+                self.events.append(event)
+            if len(self.events) > 128:
+                del self.events[: len(self.events) - 128]
+
+    @contextmanager
+    def pause(self):
+        yield
+
+    def replay(self):
+        with self.lock:
+            events, self.events = self.events, []
+        for stage, detail, measurement in events:
+            emit(stage, detail, **measurement)
 
 
 class ProgressLogHandler(logging.StreamHandler):

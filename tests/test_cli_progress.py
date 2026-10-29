@@ -55,7 +55,8 @@ def test_fetch_failure_records_stage_and_continues(tmp_path, monkeypatch):
     args = cli._get_parser().parse_args(["one", "two", "--report", str(report), "--quiet"])
     assert cli._run_get(args, Config()) == 1
     rows = json.loads(report.read_text())
-    assert len(calls) == len(rows) == 2
+    assert len(calls) == 1  # Identical papers share the same failed acquisition.
+    assert len(rows) == 2
     assert all(row["failed_stage"] == "fetch" for row in rows)
     assert all(set(row["timings"]) == {"resolve", "fetch"} for row in rows)
 

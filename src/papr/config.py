@@ -37,6 +37,7 @@ class Config:
     auto_accept_score: float = 0.78
     auto_accept_margin: float = 0.08
     max_candidates: int = 5
+    jobs: int = 4
     local_sources: bool = True
     zotero_api_url: str = "http://127.0.0.1:23119/api"
     zotero_data_dir: Path | None = None
@@ -67,6 +68,7 @@ class Config:
             if invalid or not 0 <= value <= 1:
                 raise ValueError(f"matching.{name} must be a number between 0 and 1")
         for name in (
+            "jobs",
             "max_candidates",
             "filename_max_length",
             "pdf_compression_dpi",
@@ -75,6 +77,7 @@ class Config:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 key = {
+                    "jobs": "jobs",
                     "max_candidates": "matching.max_candidates",
                     "filename_max_length": "filename.max_length",
                     "pdf_compression_dpi": "pdf.dpi",
@@ -167,6 +170,7 @@ class Config:
                 cfg.download_dir = _config_path(data["download_dir"], "download_dir")
             if "formats" in data:
                 cfg.formats = data["formats"]
+            cfg.jobs = data.get("jobs", cfg.jobs)
             cfg.email = data.get("email", cfg.email)
             cfg.unpaywall_email = data.get("unpaywall_email", cfg.unpaywall_email)
             cfg.openalex_api_key = data.get("openalex_api_key", cfg.openalex_api_key)
