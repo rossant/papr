@@ -1,0 +1,114 @@
+{
+  "revision": "79ee1e0a923f53c99b8f816fa375616e9e284636",
+  "python": "3.13.3",
+  "platform": "Linux",
+  "jobs": 1,
+  "papers": 8,
+  "repeats": 3,
+  "fixture_delays_seconds": {
+    "metadata": 0.08,
+    "pdf": 0.2,
+    "discovery": 0.1
+  },
+  "results": [
+    {
+      "scenario": "known",
+      "median_seconds": 4.488,
+      "runs": [
+        {
+          "seconds": 4.488,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 4.4557,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 4.511,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        }
+      ]
+    },
+    {
+      "scenario": "discovery",
+      "median_seconds": 4.4433,
+      "runs": [
+        {
+          "seconds": 4.4704,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 4.4433,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 4.3699,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 1
+        }
+      ]
+    },
+    {
+      "scenario": "local-zotero",
+      "median_seconds": 0.9041,
+      "runs": [
+        {
+          "seconds": 0.8579,
+          "requests": {
+            "zotero": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 0.9263,
+          "requests": {
+            "zotero": 8
+          },
+          "peak_active_requests": 1
+        },
+        {
+          "seconds": 0.9041,
+          "requests": {
+            "zotero": 8
+          },
+          "peak_active_requests": 1
+        }
+      ]
+    }
+  ]
+}

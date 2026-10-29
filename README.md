@@ -40,6 +40,9 @@ For an ordinary text query, `papr` now searches local sources first:
 5. OpenAlex
 6. PubMed for explicit PMIDs
 
+Crossref and OpenAlex run concurrently when remote resolution is needed, with
+metadata merged in the listed order.
+
 A short query such as:
 
 ```bash
@@ -56,12 +59,13 @@ and asks you to choose interactively.
 If the selected local record already has an attached PDF, that local PDF is used
 before any OA, publisher, or UCL request.
 
-The same applies to DOI input: when a DOI is present in Zotero or Zolit and has a
-known local PDF, `papr` uses that PDF.
+Exact DOI and PMID inputs, and imported references with confident local matches,
+follow the same priority: a known local PDF is used first.
 
 ## Zotero integration
 
-Preferred access is Zotero's local Web API at:
+Attachment lookup checks a read-only Zotero SQLite snapshot first. When no
+usable matching attachment is found, papr can query Zotero's local Web API at:
 
 ```text
 http://127.0.0.1:23119/api
@@ -125,15 +129,14 @@ compressed copy has different bytes, rather than adding another attachment. PDFs
 stored as copies by default, and a failed Zotero import leaves the downloaded
 PDF in place.
 
-If the local API is unavailable, `papr` can fall back to a read-only SQLite
-snapshot. Standard data directories are detected automatically:
+Standard data directories for the SQLite snapshot are detected automatically:
 
 ```text
 ~/Zotero
 ~/Library/Application Support/Zotero
 ```
 
-The SQLite fallback is read-only and uses SQLite's backup mechanism rather than
+The snapshot is read-only and uses SQLite's backup mechanism rather than
 modifying `zotero.sqlite`. If Zotero holds the database lock, papr stops trying
 after about one second and continues to other sources. Failed snapshots are
 remembered for the rest of that command so batch items do not repeat the wait.
@@ -246,11 +249,11 @@ candidate is found. A verified DOI or PMID match is accepted directly. Use
 
 The acquisition order is:
 
-1. PDF already attached locally through Zotero/Zolit
+1. supplied PDF or PDF already attached locally through Zotero/Zolit
 2. cached PDF
-3. open-access PDF URL returned by OpenAlex
-4. Unpaywall, when an email is configured
-5. PubMed Central, when a PMCID is known
+3. known direct PDF URL from reference metadata
+4. PubMed Central, when a PMCID is known
+5. Unpaywall, when an email is configured
 6. publisher/DOI landing page and `citation_pdf_url`
 7. UCL authenticated access, when configured
 
@@ -418,6 +421,7 @@ Example:
 ```toml
 download_dir = "~/Downloads"
 formats = ["pdf"]
+jobs = 4
 email = "me@example.org"
 # unpaywall_email = "me@example.org"
 # openalex_api_key = "..."
@@ -463,6 +467,40 @@ PAPR_ZOLIT_SBS_REPO
 ```
 
 ## Batch mode
+
+Fetch several papers concurrently with:
+
+```bash
+papr references.txt --non-interactive --jobs 4
+```
+
+`jobs` defaults to 4; `--jobs 1` fetches one paper at a time. Interactive
+selection, dry runs, and renaming keep sequential paper processing. Resolution
+and output publication stay on the coordinator thread; only PDF acquisition
+runs in the fetch workers. Independent Crossref and OpenAlex requests can
+overlap after local lookup. Outputs, history, and manifests retain input order.
+UCL browser access stays serialized, and duplicate papers share one acquisition
+within a concurrent run, including with `--refresh`.
+
+Local PDFs have priority. Supplied PDFs and confidently matched Zotero SQLite
+attachments are checked before external metadata or PDF requests. Other offline
+libraries are checked before a configured hosted Zotero API. `--enrich` explicitly
+allows metadata requests while preserving a valid supplied PDF; `--local-only`
+still forbids external resolution. Ambiguous local matches can require further
+metadata or interactive selection. Once resolved, a valid local attachment wins
+over the PDF cache, followed by known direct OA/PMC URLs, Unpaywall discovery,
+publisher/DOI links, and finally UCL. `--refresh` bypasses the PDF cache but keeps
+valid local attachments; `--no-local` disables library lookup.
+
+Requests reuse a command-scoped HTTP client with at most two active responses per
+host, including through configured proxies. Transient 429/503 responses have a
+bounded retry budget that honors `Retry-After`. OA discovery/download fallback
+has a 120-second deadline budget; PDFs stream to temporary files and HTML link
+discovery reads at most 2 MiB. Fetch concurrency does not increase simultaneous
+compression, OCR, or Zotero publication.
+
+See [the benchmark report](benchmarks/README.md) for the before/after measurements,
+request counts, and a reproducible local-server workload.
 
 ```bash
 papr refs.txt -f pdf,md --non-interactive --report report.json
@@ -536,6 +574,10 @@ results and errors. `--verbose` adds resolver and download diagnostics.
 Each item in the JSON file written by `--report` includes `duration` in seconds,
 per-stage `timings` in seconds, and `failed_stage` on errors. The terminal summary
 shows successes, failures, cache hits, elapsed time, and the output directory.
+During concurrent fetching, `duration` runs from preparation through publication,
+including time in the bounded queue; resolve/fetch timings record the actual
+work, including shared acquisition for duplicates. Papers overlap, so adding
+their timings does not give batch elapsed time.
 
 The process exits non-zero if at least one item fails.
 Unreadable or malformed input files and corrupt PDFs are recorded in the report;
@@ -596,7 +638,8 @@ papr unknown.pdf --rename --dry-run
 ```
 
 For local PDFs, papr looks for a DOI in extracted text, then PDF metadata, and
-attempts bibliographic enrichment using metadata or the filename. The file's
+attempts local bibliographic enrichment using metadata or the filename. Add
+`--enrich` to allow external metadata requests. The file's
 creation date is not used as the publication year.
 `--local-only` and `--no-local` also control this enrichment. `--dry-run` previews
 the destination without renaming or replacing PDFs.

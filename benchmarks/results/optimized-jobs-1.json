@@ -1,0 +1,105 @@
+{
+  "revision": "2b9ce642c15cc5f1cdcd25282fb57f3656ba6deb",
+  "python": "3.13.3",
+  "platform": "Linux",
+  "jobs": 1,
+  "papers": 8,
+  "repeats": 3,
+  "fixture_delays_seconds": {
+    "metadata": 0.08,
+    "pdf": 0.2,
+    "discovery": 0.1
+  },
+  "results": [
+    {
+      "scenario": "known",
+      "median_seconds": 2.431,
+      "runs": [
+        {
+          "seconds": 2.4357,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        },
+        {
+          "seconds": 2.4264,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        },
+        {
+          "seconds": 2.431,
+          "requests": {
+            "openalex": 8,
+            "crossref": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        }
+      ]
+    },
+    {
+      "scenario": "discovery",
+      "median_seconds": 3.2485,
+      "runs": [
+        {
+          "seconds": 3.2563,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        },
+        {
+          "seconds": 3.2485,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        },
+        {
+          "seconds": 3.2296,
+          "requests": {
+            "crossref": 8,
+            "openalex": 8,
+            "unpaywall": 8,
+            "pdf": 8
+          },
+          "peak_active_requests": 2
+        }
+      ]
+    },
+    {
+      "scenario": "local-zotero",
+      "median_seconds": 0.0951,
+      "runs": [
+        {
+          "seconds": 0.1039,
+          "requests": {},
+          "peak_active_requests": 0
+        },
+        {
+          "seconds": 0.0951,
+          "requests": {},
+          "peak_active_requests": 0
+        },
+        {
+          "seconds": 0.0881,
+          "requests": {},
+          "peak_active_requests": 0
+        }
+      ]
+    }
+  ]
+}
