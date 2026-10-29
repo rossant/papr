@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from pathlib import Path
 
 from rapidfuzz.fuzz import ratio, token_set_ratio
 
@@ -14,6 +15,20 @@ DOI_RE = re.compile(
 PMID_RE = re.compile(r"(?:pmid:\s*)?(\d{5,10})$", re.I)
 YEAR_RE = re.compile(r"\b(18|19|20|21)\d{2}\b")
 WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
+
+
+def is_local_pdf(value: str | Path | None) -> bool:
+    """Check the same PDF signature used by fetching before skipping online metadata."""
+    if not value:
+        return False
+    path = Path(value).expanduser()
+    try:
+        if not path.is_file():
+            return False
+        with path.open("rb") as stream:
+            return stream.read(5) == b"%PDF-"
+    except OSError:
+        return False
 
 
 def normalize_doi(value: str | None) -> str | None:
@@ -97,6 +112,7 @@ def deduplicate(articles: Iterable[Article]) -> list[Article]:
                 existing
                 for existing in out
                 if (article.doi and existing.doi == article.doi)
+                or (article.pmid and existing.pmid == article.pmid)
                 or (
                     title
                     and title == " ".join(WORD_RE.findall(existing.title.casefold()))

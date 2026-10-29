@@ -8,7 +8,7 @@ from pypdf import PdfReader
 from .config import Config
 from .model import Article, Person
 from .resolvers import resolve
-from .resolvers.common import extract_doi, extract_year
+from .resolvers.common import extract_doi, extract_year, is_local_pdf
 from .selection import select_candidate
 
 
@@ -21,6 +21,9 @@ def article_from_pdf(
     enrich: bool = False,
 ) -> Article:
     options = {"enrich": True} if enrich else {}
+    # An explicit PDF already supplies the document; online metadata is opt-in.
+    if not enrich and is_local_pdf(path):
+        use_remote = False
     reader = PdfReader(str(path))
     meta = reader.metadata or {}
     chunks = []

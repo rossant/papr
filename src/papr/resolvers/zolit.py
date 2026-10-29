@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import tomllib
 from pathlib import Path
@@ -137,6 +138,11 @@ def _article_from_row(
         issue=fields.get("issue") or None,
         pages=fields.get("pages") or None,
         doi=normalize_doi(row["doi"]),
+        pmid=(
+            match.group(1)
+            if (match := re.search(r"(?im)^PMID\s*:\s*(\d+)\s*$", fields.get("extra") or ""))
+            else None
+        ),
         url=fields.get("url") or None,
         abstract=fields.get("abstractNote") or None,
         item_type=from_zotero(item_type),
@@ -222,6 +228,17 @@ def by_doi(doi: str, config: Config) -> Article | None:
         return None
     for article in _all_articles(db, config.zotero_group_id):
         if article.doi == target:
+            article.score = 1.0
+            return article
+    return None
+
+
+def by_pmid(pmid: str, config: Config) -> Article | None:
+    db = find_db(config)
+    if not db:
+        return None
+    for article in _all_articles(db, config.zotero_group_id):
+        if article.pmid == pmid:
             article.score = 1.0
             return article
     return None

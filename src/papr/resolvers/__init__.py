@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from ..config import Config
 from ..model import Article
 from ..progress import emit
 from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
-from .common import deduplicate, extract_doi, extract_pmid
+from .common import deduplicate, extract_doi, extract_pmid, is_local_pdf
 
 logger = logging.getLogger(__name__)
 
 LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search)
 LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi, zolit_sbs.by_doi)
+LOCAL_PMID_LOOKUPS = (zotero.by_pmid, zolit.by_pmid, zolit_sbs.by_pmid)
 
 
 def _local_search(query: str, config: Config) -> list[Article]:
@@ -40,6 +40,19 @@ def _local_by_doi(doi: str, config: Config) -> list[Article]:
         except Exception:
             logger.debug("DOI resolver %s failed", lookup.__module__, exc_info=True)
             continue
+    return deduplicate(articles)
+
+
+def _local_by_pmid(pmid: str, config: Config) -> list[Article]:
+    articles = []
+    for lookup in LOCAL_PMID_LOOKUPS:
+        emit("resolve", f"Looking up PMID in {lookup.__module__.rsplit('.', 1)[-1]}")
+        try:
+            article = lookup(pmid, config)
+            if article:
+                articles.append(article)
+        except Exception:
+            logger.debug("PMID resolver %s failed", lookup.__module__, exc_info=True)
     return deduplicate(articles)
 
 
@@ -88,7 +101,7 @@ def resolve(
         local = _local_by_doi(doi, config) if use_local and config.local_sources else []
         if not use_remote:
             return local
-        if not enrich and any(a.local_pdf and Path(a.local_pdf).is_file() for a in local):
+        if not enrich and any(is_local_pdf(a.local_pdf) for a in local):
             return local
         remote = []
         for fn in (crossref.by_doi, openalex.by_doi):
@@ -104,8 +117,9 @@ def resolve(
 
     pmid = extract_pmid(query)
     if pmid:
-        if not use_remote:
-            return []
+        local = _local_by_pmid(pmid, config) if use_local and config.local_sources else []
+        if not use_remote or (not enrich and any(is_local_pdf(a.local_pdf) for a in local)):
+            return local
         emit("resolve", "Looking up PMID in PubMed")
         try:
             article = pubmed.by_pmid(pmid, config)
@@ -117,10 +131,10 @@ def resolve(
                         article.merge(oa)
                 except Exception:
                     logger.debug("OpenAlex PMID enrichment failed", exc_info=True)
-            return [article] if article else []
+            return deduplicate([*local, *([article] if article else [])])
         except Exception:
             logger.debug("PubMed resolver failed", exc_info=True)
-            return []
+            return local
 
     local: list[Article] = []
     if use_local and config.local_sources:
@@ -129,7 +143,7 @@ def resolve(
             return local
         if _strong_local(local, config):
             best = local[0]
-            if not enrich and (best.doi or best.local_pdf):
+            if not enrich and (best.doi or is_local_pdf(best.local_pdf)):
                 return local
             remote = _remote_search(_expanded_query(best), config)
             result = deduplicate([*local, *remote])

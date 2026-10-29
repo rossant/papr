@@ -114,3 +114,18 @@ def by_doi(doi: str, config: Config) -> Article | None:
             article.score = 1.0
             return article
     return None
+
+
+def by_pmid(pmid: str, config: Config) -> Article | None:
+    domain = find_domain(config)
+    if not domain:
+        return None
+    try:
+        articles = load_references(domain)
+    except (OSError, ValueError, TypeError):
+        return None
+    for article in articles:
+        if article.pmid == pmid:
+            article.score = 1.0
+            return article
+    return None

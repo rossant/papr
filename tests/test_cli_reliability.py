@@ -77,7 +77,7 @@ def test_pdf_enrichment_respects_source_policy(tmp_path, monkeypatch, use_local,
     assert source == pdf
     assert article.title == "A paper"
     assert seen
-    assert all(options == {"use_local": use_local, "use_remote": use_remote} for options in seen)
+    assert all(options == {"use_local": use_local, "use_remote": False} for options in seen)
 
 
 @pytest.mark.parametrize("overwrite", [True, False])

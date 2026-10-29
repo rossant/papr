@@ -8,6 +8,7 @@ from .config import Config
 from .formats import bib, csl
 from .local import article_from_pdf
 from .model import Article, article_from_dict
+from .resolvers.common import is_local_pdf
 from .selection import select_candidate
 
 
@@ -56,6 +57,8 @@ def materialize_article(
     options = {"enrich": True} if enrich else {}
 
     if isinstance(item, Article):
+        if not enrich and is_local_pdf(item.local_pdf):
+            return item, None
         if item.doi:
             richer = resolve(
                 item.doi, config, use_local=use_local, use_remote=use_remote, **options

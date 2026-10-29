@@ -498,3 +498,73 @@ def test_zotero_group_without_library_mapping_does_not_read_all_records(tmp_path
     config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
     config.zotero_group_id = 999999
     assert zotero.search_sqlite("Jenny 2006", config) == []
+
+
+@pytest.mark.parametrize("query", ["10.1000/jenny", "pmid:123456", "Jenny 2006"])
+def test_zotero_pdf_precedes_all_online_metadata(tmp_path, monkeypatch, query):
+    from papr import resolvers
+
+    _make_zotero_db(tmp_path / "zotero.sqlite")
+    with sqlite3.connect(tmp_path / "zotero.sqlite") as conn:
+        conn.execute("insert into fields values (5, 'extra')")
+        conn.execute("insert into itemDataValues values (5, 'PMID: 123456')")
+        conn.execute("insert into itemData values (1, 5, 5)")
+    storage = tmp_path / "storage" / "ATTACH"
+    storage.mkdir(parents=True)
+    pdf = storage / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    calls = []
+
+    def unexpected(*args, **kwargs):
+        calls.append(args)
+        return []
+
+    # Isolate configured local sources from any developer library on disk.
+    monkeypatch.setattr(resolvers, "LOCAL_SEARCHERS", (zotero.search,))
+    monkeypatch.setattr(resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi,))
+    monkeypatch.setattr(resolvers, "LOCAL_PMID_LOOKUPS", (zotero.by_pmid,))
+    # Even a configured remote Zotero API must wait for the SQLite attachment.
+    monkeypatch.setattr(zotero, "_api_articles", unexpected)
+    monkeypatch.setattr(resolvers.crossref, "by_doi", unexpected)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", unexpected)
+    monkeypatch.setattr(resolvers.pubmed, "by_pmid", unexpected)
+    monkeypatch.setattr(resolvers, "_remote_search", unexpected)
+    cfg = Config(zotero_api_url="https://example.org/zotero", zotero_data_dir=tmp_path)
+    with resolution_session():
+        results = resolvers.resolve(query, cfg)
+    assert len(results) == 1
+    assert results[0].local_pdf == str(pdf)
+    assert calls == []
+
+
+def test_zotero_skips_invalid_attachment_and_uses_valid_one(tmp_path):
+    _make_zotero_db(tmp_path / "zotero.sqlite")
+    storage = tmp_path / "storage" / "ATTACH"
+    storage.mkdir(parents=True)
+    (storage / "paper.pdf").write_text("not a PDF")
+    valid = storage / "valid.pdf"
+    valid.write_bytes(b"%PDF-1.7\n")
+    with sqlite3.connect(tmp_path / "zotero.sqlite") as conn:
+        conn.execute("insert into items values (3, 'ATTACH', 2)")
+        conn.execute(
+            "insert into itemAttachments values (3, 1, 'storage:valid.pdf', 'application/pdf')"
+        )
+    found = zotero.by_doi("10.1000/jenny", Config(zotero_api_url="", zotero_data_dir=tmp_path))
+    assert found.local_pdf == str(valid)
+
+
+def test_zotero_metadata_api_does_not_hide_sqlite_attachment(tmp_path, monkeypatch):
+    # Search and DOI previously returned the API item immediately, dropping the PDF.
+    _make_zotero_db(tmp_path / "zotero.sqlite")
+    storage = tmp_path / "storage" / "ATTACH"
+    storage.mkdir(parents=True)
+    pdf = storage / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr(
+        zotero,
+        "_api_articles",
+        lambda *args: [zotero.from_api_item({"title": "A Jenny paper", "DOI": "10.1000/jenny"})],
+    )
+    cfg = Config(zotero_data_dir=tmp_path)
+    assert zotero.by_doi("10.1000/jenny", cfg).local_pdf == str(pdf)
+    assert zotero.search("Jenny 2006", cfg)[0].local_pdf == str(pdf)

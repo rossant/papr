@@ -13,7 +13,7 @@ from ..config import Config
 from ..item_types import from_zotero
 from ..model import Article, Person
 from ..progress import emit
-from .common import extract_year, normalize_doi, score_article
+from .common import deduplicate, extract_year, is_local_pdf, normalize_doi, score_article
 from .session import cached_library
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ def _api_attachment(
         if file_r.status_code >= 400:
             continue
         path = _file_url_to_path(file_r.text)
-        if path and path.exists():
+        if path and is_local_pdf(path):
             return str(path)
     return None
 
@@ -409,7 +409,7 @@ def _attachment_path(row: sqlite3.Row, data_dir: Path) -> Path | None:
         path = data_dir / "storage" / row["key"] / raw.removeprefix("storage:")
     else:
         path = Path(raw).expanduser()
-    return path if path.is_absolute() and path.is_file() else None
+    return path if path.is_absolute() and is_local_pdf(path) else None
 
 
 def _sqlite_all(config: Config) -> list[Article]:
@@ -461,38 +461,58 @@ def search_sqlite(query: str, config: Config) -> list[Article]:
     return articles[: config.max_candidates]
 
 
+def _sqlite_matches(config: Config, field: str, target: str) -> list[Article]:
+    try:
+        matches = [article for article in _sqlite_all(config) if getattr(article, field) == target]
+    except (sqlite3.Error, OSError):
+        emit("resolve", "Zotero database unavailable; continuing with other sources")
+        logger.debug("Zotero SQLite lookup failed", exc_info=True)
+        return []
+    for article in matches:
+        article.score = 1.0
+    return matches
+
+
 def by_doi(doi: str, config: Config) -> Article | None:
     target = normalize_doi(doi)
     if not target:
         return None
+    local = _sqlite_matches(config, "doi", target)
+    attached = next((article for article in local if is_local_pdf(article.local_pdf)), None)
+    if attached:
+        return attached
     try:
-        for article in _api_articles(target, config, "everything"):
-            if article.doi == target:
-                article.score = 1.0
-                return article
+        remote = _api_articles(target, config, "everything")
+        matches = deduplicate([*remote, *local])
+        if matches:
+            return matches[0]
     except (httpx.HTTPError, OSError, ValueError):
-        logger.debug("Zotero API unavailable; trying SQLite", exc_info=True)
-    try:
-        for article in _sqlite_all(config):
-            if article.doi == target:
-                article.score = 1.0
-                return article
-    except (sqlite3.Error, OSError):
-        emit("resolve", "Zotero database unavailable; continuing with other sources")
-        logger.debug("Zotero SQLite lookup failed", exc_info=True)
-    return None
+        logger.debug("Zotero API unavailable; using SQLite", exc_info=True)
+    return local[0] if local else None
+
+
+def by_pmid(pmid: str, config: Config) -> Article | None:
+    matches = _sqlite_matches(config, "pmid", pmid)
+    return next(
+        (article for article in matches if is_local_pdf(article.local_pdf)),
+        matches[0] if matches else None,
+    )
 
 
 def search(query: str, config: Config) -> list[Article]:
     try:
-        result = search_api(query, config)
-        if result:
-            return result
-    except (httpx.HTTPError, OSError, ValueError):
-        logger.debug("Zotero API unavailable; trying SQLite", exc_info=True)
-    try:
-        return search_sqlite(query, config)
+        local = search_sqlite(query, config)
     except (sqlite3.Error, OSError):
         emit("resolve", "Zotero database unavailable; continuing with other sources")
         logger.debug("Zotero SQLite search failed", exc_info=True)
-        return []
+        local = []
+    # Keep all candidates for the normal ambiguity policy in the resolver/chooser.
+    if any(is_local_pdf(article.local_pdf) for article in local):
+        return local
+    try:
+        result = deduplicate([*search_api(query, config), *local])
+        result.sort(key=lambda article: article.score or 0.0, reverse=True)
+        return result[: config.max_candidates]
+    except (httpx.HTTPError, OSError, ValueError):
+        logger.debug("Zotero API unavailable; using SQLite", exc_info=True)
+    return local

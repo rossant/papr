@@ -126,3 +126,97 @@ def test_doi_enrichment_preserves_local_conference_type(monkeypatch):
     result = resolvers.resolve("10.1000/jenny", Config(), enrich=True)
     assert result[0].item_type == "paper-conference"
     assert result[0].abstract == "Enrichment"
+
+
+@pytest.mark.parametrize("enrich,use_local,use_remote,expected_calls", [
+    (False, True, True, 0),
+    (True, True, True, 2),
+    (False, False, True, 2),
+    (True, True, False, 0),
+])
+def test_pmid_local_pdf_policy(
+    tmp_path, monkeypatch, enrich, use_local, use_remote, expected_calls
+):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    local = Article("Local title", pmid="123456", local_pdf=str(pdf), score=1.0)
+    calls = []
+    monkeypatch.setattr(resolvers, "_local_by_pmid", lambda *args: [local])
+
+    def pubmed(*args):
+        calls.append("pubmed")
+        return Article("Remote title", pmid="123456", doi="10.1000/jenny")
+
+    def openalex(*args):
+        calls.append("openalex")
+        return None
+
+    monkeypatch.setattr(resolvers.pubmed, "by_pmid", pubmed)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", openalex)
+    result = resolvers.resolve(
+        "pmid:123456", Config(), enrich=enrich, use_local=use_local, use_remote=use_remote
+    )
+    assert len(calls) == expected_calls
+    assert len(result) == 1
+    if use_local:
+        assert result[0].local_pdf == str(pdf)
+
+
+def test_invalid_local_pdf_does_not_skip_doi_metadata(tmp_path, monkeypatch):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_text("not a PDF")
+    local = _jenny("Local")
+    local.local_pdf = str(pdf)
+    monkeypatch.setattr(resolvers, "_local_by_doi", lambda *args: [local])
+    calls = []
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: calls.append("crossref"))
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: calls.append("openalex"))
+    resolvers.resolve("10.1000/jenny", Config())
+    assert calls == ["crossref", "openalex"]
+
+
+@pytest.mark.parametrize("use_local", [False, True])
+def test_supplied_article_pdf_avoids_online_resolution(tmp_path, monkeypatch, use_local):
+    from papr.input import materialize_article
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    article = Article("Supplied", doi="10.1000/jenny", local_pdf=str(pdf))
+    calls = []
+    monkeypatch.setattr(resolvers, "resolve", lambda *args, **kwargs: calls.append(kwargs))
+    assert materialize_article(article, Config(), use_local=use_local) == (article, None)
+    assert calls == []
+
+
+@pytest.mark.parametrize("enrich", [False, True])
+def test_supplied_article_enrich_is_explicit(tmp_path, monkeypatch, enrich):
+    from papr.input import materialize_article
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    article = Article("Supplied", doi="10.1000/jenny", local_pdf=str(pdf))
+    calls = []
+    monkeypatch.setattr(resolvers, "resolve", lambda *args, **kwargs: calls.append(kwargs) or [])
+    materialize_article(article, Config(), enrich=enrich)
+    assert len(calls) == int(enrich)
+    if enrich:
+        assert calls[0]["enrich"] is True
+
+
+@pytest.mark.parametrize("enrich", [False, True])
+def test_supplied_pdf_online_metadata_requires_enrich(tmp_path, monkeypatch, enrich):
+    from pypdf import PdfWriter
+
+    from papr.input import materialize_article
+
+    pdf = tmp_path / "paper.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_metadata({"/Subject": "doi:10.1000/jenny"})
+    writer.write(pdf)
+    calls = []
+    monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: calls.append("crossref"))
+    monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: calls.append("openalex"))
+    monkeypatch.setattr(resolvers, "_remote_search", lambda *args: calls.append("search") or [])
+    materialize_article(pdf, Config(), use_local=False, enrich=enrich)
+    assert bool(calls) is enrich
