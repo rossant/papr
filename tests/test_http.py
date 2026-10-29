@@ -19,9 +19,9 @@ def test_session_borrows_one_client_and_closes_on_error(monkeypatch):
 
     monkeypatch.setattr(http, "_new_client", make_client)
     with pytest.raises(RuntimeError):
-        with http.http_session() as session:
-            with http.client() as first, http.http_session() as nested:
-                assert first is nested is session
+        with http.http_session():
+            with http.client() as session, http.http_session(), http.client() as nested:
+                assert nested is session
             assert not session.is_closed
             context = copy_context()
             with ThreadPoolExecutor(1) as executor:
@@ -153,3 +153,40 @@ def test_environment_proxy_and_no_proxy_keep_limits_and_retries(monkeypatch):
         ("proxy", "proxied.test"), ("proxy", "proxied.test"), ("direct", "direct.test")
     ]
     assert sleeps == [1]
+
+
+
+def test_unused_session_never_constructs_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing-ca.pem"))
+    with http.http_session(), http.http_session():
+        pass
+    monkeypatch.setattr(http, "_new_client", lambda: pytest.fail("unused session created a client"))
+    with http.http_session():
+        pass
+
+
+def test_simultaneous_workers_initialize_session_once(monkeypatch):
+    import threading
+
+    created = []
+    barrier = threading.Barrier(4)
+
+    def make_client():
+        owned = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+        created.append(owned)
+        return owned
+
+    def worker():
+        barrier.wait(timeout=5)
+        with http.client() as borrowed:
+            return borrowed
+
+    monkeypatch.setattr(http, "_new_client", make_client)
+    with http.http_session(), ThreadPoolExecutor(4) as executor:
+        contexts = [copy_context() for _ in range(4)]
+        futures = [executor.submit(context.run, worker) for context in contexts]
+        borrowed = [future.result() for future in futures]
+        assert len(created) == 1
+        assert all(item is created[0] for item in borrowed)
+        assert not created[0].is_closed
+    assert created[0].is_closed

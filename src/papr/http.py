@@ -13,7 +13,7 @@ import httpx
 from . import __version__
 
 USER_AGENT = f"papr/{__version__} (+https://github.com/rossant/papr)"
-_session: ContextVar[httpx.Client | None] = ContextVar("papr_http_session", default=None)
+_session: ContextVar[_Session | None] = ContextVar("papr_http_session", default=None)
 _deadline: ContextVar[float | None] = ContextVar("papr_http_deadline", default=None)
 
 
@@ -156,25 +156,49 @@ def _new_client() -> httpx.Client:
     )
 
 
+class _Session:
+    """Create one client on first use, including simultaneous worker access."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.client: httpx.Client | None = None
+        self.closed = False
+
+    def get_client(self) -> httpx.Client:
+        with self.lock:
+            if self.closed:
+                raise RuntimeError("HTTP session is already closed")
+            if self.client is None:
+                self.client = _new_client()
+            return self.client
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            if self.client is not None:
+                self.client.close()
+
+
 @contextmanager
 def client() -> Iterator[httpx.Client]:
     shared = _session.get()
     if shared is not None:
-        yield shared
+        yield shared.get_client()
     else:
         with _new_client() as owned:
             yield owned
 
 
 @contextmanager
-def http_session() -> Iterator[httpx.Client]:
-    """Reuse a thread-safe client for a command; workers must copy their context."""
+def http_session() -> Iterator[None]:
+    """Lazily reuse a client for a command; workers must copy their context."""
     if _session.get() is not None:
-        yield _session.get()
+        yield
         return
-    with _new_client() as owned:
-        token = _session.set(owned)
-        try:
-            yield owned
-        finally:
-            _session.reset(token)
+    owned = _Session()
+    token = _session.set(owned)
+    try:
+        yield
+    finally:
+        _session.reset(token)
+        owned.close()
