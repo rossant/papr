@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from typing import TypeVar
 
 from ..config import Config
 from ..model import Article
-from ..progress import emit
+from ..progress import _current, emit
 from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
 from .common import deduplicate, extract_doi, extract_pmid, is_local_pdf
 
@@ -68,16 +72,43 @@ def _strong_local(candidates: list[Article], config: Config) -> bool:
     return first - second >= config.auto_accept_margin
 
 
-def _remote_search(query: str, config: Config) -> list[Article]:
-    articles: list[Article] = []
-    for searcher in (crossref.search, openalex.search):
-        emit("resolve", f"Searching {searcher.__module__.rsplit('.', 1)[-1]}")
+_Result = TypeVar("_Result")
+
+
+def _remote_providers(
+    providers: Sequence[Callable[[str, Config], _Result]],
+    query: str,
+    config: Config,
+    detail: str,
+) -> list[_Result]:
+    """Run independent providers together and collect in stable provider order."""
+
+    def invoke(provider: Callable[[str, Config], _Result]) -> _Result:
+        # Each worker inherits its own context, including the command HTTP session.
+        # Reporter owns terminal state and must only be called by the main thread.
+        token = _current.set(None)
         try:
-            articles.extend(searcher(query, config))
-        except Exception:
-            logger.debug("Resolver %s failed", searcher.__module__, exc_info=True)
-            continue
-    return articles
+            return provider(query, config)
+        finally:
+            _current.reset(token)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="papr-metadata") as pool:
+        futures = []
+        for provider in providers:
+            emit("resolve", f"{detail} {provider.__module__.rsplit('.', 1)[-1]}")
+            futures.append(pool.submit(copy_context().run, invoke, provider))
+        for provider, future in zip(providers, futures, strict=True):
+            try:
+                results.append(future.result())
+            except Exception:
+                logger.debug("Resolver %s failed", provider.__module__, exc_info=True)
+    return results
+
+
+def _remote_search(query: str, config: Config) -> list[Article]:
+    groups = _remote_providers((crossref.search, openalex.search), query, config, "Searching")
+    return [article for group in groups for article in group]
 
 
 def _expanded_query(article: Article) -> str:
@@ -103,16 +134,13 @@ def resolve(
             return local
         if not enrich and any(is_local_pdf(a.local_pdf) for a in local):
             return local
-        remote = []
-        for fn in (crossref.by_doi, openalex.by_doi):
-            emit("resolve", f"Looking up DOI in {fn.__module__.rsplit('.', 1)[-1]}")
-            try:
-                item = fn(doi, config)
-                if item:
-                    remote.append(item)
-            except Exception:
-                logger.debug("DOI resolver %s failed", fn.__module__, exc_info=True)
-                continue
+        remote = [
+            article
+            for article in _remote_providers(
+                (crossref.by_doi, openalex.by_doi), doi, config, "Looking up DOI in"
+            )
+            if article is not None
+        ]
         return deduplicate([*local, *remote])
 
     pmid = extract_pmid(query)

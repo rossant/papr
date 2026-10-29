@@ -128,12 +128,15 @@ def test_doi_enrichment_preserves_local_conference_type(monkeypatch):
     assert result[0].abstract == "Enrichment"
 
 
-@pytest.mark.parametrize("enrich,use_local,use_remote,expected_calls", [
-    (False, True, True, 0),
-    (True, True, True, 2),
-    (False, False, True, 2),
-    (True, True, False, 0),
-])
+@pytest.mark.parametrize(
+    "enrich,use_local,use_remote,expected_calls",
+    [
+        (False, True, True, 0),
+        (True, True, True, 2),
+        (False, False, True, 2),
+        (True, True, False, 0),
+    ],
+)
 def test_pmid_local_pdf_policy(
     tmp_path, monkeypatch, enrich, use_local, use_remote, expected_calls
 ):
@@ -172,7 +175,7 @@ def test_invalid_local_pdf_does_not_skip_doi_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(resolvers.crossref, "by_doi", lambda *args: calls.append("crossref"))
     monkeypatch.setattr(resolvers.openalex, "by_doi", lambda *args: calls.append("openalex"))
     resolvers.resolve("10.1000/jenny", Config())
-    assert calls == ["crossref", "openalex"]
+    assert sorted(calls) == ["crossref", "openalex"]
 
 
 @pytest.mark.parametrize("use_local", [False, True])
@@ -220,3 +223,92 @@ def test_supplied_pdf_online_metadata_requires_enrich(tmp_path, monkeypatch, enr
     monkeypatch.setattr(resolvers, "_remote_search", lambda *args: calls.append("search") or [])
     materialize_article(pdf, Config(), use_local=False, enrich=enrich)
     assert bool(calls) is enrich
+
+
+@pytest.mark.parametrize("query,method", [("10.1000/example", "by_doi"), ("Some paper", "search")])
+def test_remote_providers_overlap_with_stable_merge_order(monkeypatch, query, method):
+    import threading
+
+    barrier = threading.Barrier(2, timeout=3)
+    openalex_finished = threading.Event()
+    threads = []
+
+    def crossref(*args):
+        threads.append(threading.get_ident())
+        barrier.wait()
+        assert openalex_finished.wait(3)
+        article = Article("Same paper", doi="10.1000/example", journal="Crossref journal")
+        return article if method == "by_doi" else [article]
+
+    def openalex(*args):
+        threads.append(threading.get_ident())
+        barrier.wait()
+        openalex_finished.set()
+        article = Article(
+            "Same paper",
+            doi="10.1000/example",
+            journal="OpenAlex journal",
+            abstract="OpenAlex abstract",
+        )
+        return article if method == "by_doi" else [article]
+
+    monkeypatch.setattr(resolvers.crossref, method, crossref)
+    monkeypatch.setattr(resolvers.openalex, method, openalex)
+    result = resolvers.resolve(query, Config(), use_local=False)
+    assert len(set(threads)) == 2
+    assert len(result) == 1
+    assert result[0].journal == "Crossref journal"
+    assert result[0].abstract == "OpenAlex abstract"
+
+
+def test_concurrent_providers_copy_context_without_sharing_reporter(monkeypatch):
+    import threading
+    from contextvars import ContextVar
+
+    from papr.progress import Reporter, emit
+
+    command_context = ContextVar("test_metadata_context", default=None)
+    barrier = threading.Barrier(2, timeout=3)
+    contexts = []
+    events = []
+    main_thread = threading.get_ident()
+
+    def provider(*args):
+        contexts.append(command_context.get())
+        # Separate copied contexts may be changed independently by each worker.
+        command_context.set("worker")
+        barrier.wait()
+        emit("resolve", "Worker event")
+        return None
+
+    monkeypatch.setattr(resolvers.crossref, "by_doi", provider)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", provider)
+    reporter = Reporter(enabled=False)
+    monkeypatch.setattr(reporter, "event", lambda *a, **k: events.append(threading.get_ident()))
+    token = command_context.set("command")
+    try:
+        with reporter:
+            assert resolvers.resolve("10.1000/example", Config(), use_local=False) == []
+        assert command_context.get() == "command"
+    finally:
+        command_context.reset(token)
+    assert contexts == ["command", "command"]
+    assert events == [main_thread, main_thread]
+
+
+def test_concurrent_provider_failure_keeps_successful_sibling(monkeypatch):
+    calls = []
+
+    def broken(*args):
+        calls.append("crossref")
+        raise ValueError("Unavailable")
+
+    def available(*args):
+        calls.append("openalex")
+        return Article("Available", doi="10.1000/example")
+
+    monkeypatch.setattr(resolvers.crossref, "by_doi", broken)
+    monkeypatch.setattr(resolvers.openalex, "by_doi", available)
+    result = resolvers.resolve("10.1000/example", Config(), use_local=False)
+    assert sorted(calls) == ["crossref", "openalex"]
+    assert [article.title for article in result] == ["Available"]
