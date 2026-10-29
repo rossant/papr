@@ -17,6 +17,7 @@ from .config import DEFAULT_TEMPLATE, Config, set_setting
 from .export import FORMAT_SUFFIX, export_outputs, output_suffix
 from .fetchers import fetch_pdf, ucl
 from .filename import basename
+from .http import http_session
 from .input import load_input, materialize_article
 from .model import Article
 from .progress import ProgressLogHandler, Reporter, emit, pause
@@ -286,7 +287,7 @@ def _config_init(config: Config) -> int:
 def _run_get(args: argparse.Namespace, config: Config) -> int:
     from .locking import state_lock
 
-    with Reporter(enabled=not args.quiet) as reporter:
+    with http_session(), Reporter(enabled=not args.quiet) as reporter:
         try:
             if args.dry_run:
                 return _run_get_reported(args, config, reporter)
@@ -700,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
         with (
             _diagnostics(args.verbose),
             resolution_session(),
+            http_session(),
             Reporter(enabled=not args.quiet) as reporter,
         ):
             reporter.start_batch(1)
