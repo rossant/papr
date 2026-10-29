@@ -56,6 +56,7 @@ class Prefetch:
         self.jobs = jobs
         self.refresh = refresh
         self.futures: dict[Path, tuple[Future, EventBuffer]] = {}
+        self.candidates: dict[Path, set[tuple]] = {}
         self.fallbacks: dict[Future, tuple[Path, str] | Exception] = {}
         self.fallback_durations: dict[Future, float] = {}
         self.staged_paths: dict[Future, Path] = {}
@@ -95,8 +96,25 @@ class Prefetch:
                         prepared.resolve_duration = perf_counter() - prepared.started
                         if needs_pdf and local is None:
                             key = _cache_path(article, self.config)
-                            if key not in self.futures:
-                                destination = Path(self.temp.name) / f"{len(self.futures)}.pdf"
+                            signature = (
+                                article.oa_pdf_url or "",
+                                article.pmcid or "",
+                                article.url or "",
+                            )
+                            previous = self.futures.get(key)
+                            seen = self.candidates.setdefault(key, set())
+                            if previous is not None and signature not in seen:
+                                # A different representation can expose a useful PDF
+                                # URL. Serialize only this rare duplicate case so two
+                                # workers never replace the same cache concurrently.
+                                try:
+                                    previous[0].result()
+                                except Exception:
+                                    self.staged_paths[previous[0]].unlink(missing_ok=True)
+                                    previous = None
+                            seen.add(signature)
+                            if previous is None:
+                                destination = Path(self.temp.name) / f"{len(self.staged_paths)}.pdf"
                                 context = copy_context()
                                 future = self.executor.submit(
                                     context.run,
@@ -153,6 +171,16 @@ class Prefetch:
             prepared.fetch_events.replay()
             if not allow_ucl:
                 raise
+            # A later duplicate may already be trying a richer OA candidate.
+            # Finish that attempt before browser fallback touches the same cache.
+            latest = self.futures[self.cache_paths[future]][0]
+            if latest is not future:
+                try:
+                    result = latest.result()
+                except Exception:
+                    pass
+                else:
+                    return self._available_result(latest, result)
             if future not in self.fallbacks:
                 started = perf_counter()
                 try:
@@ -167,6 +195,9 @@ class Prefetch:
         finally:
             # Only the coordinator touches the live reporter.
             prepared.fetch_events.replay()
+        return self._available_result(future, result)
+
+    def _available_result(self, future: Future, result: tuple[Path, str]) -> tuple[Path, str]:
         path, source = result
         if not path.exists():
             # Earlier input rows may already have published and released this

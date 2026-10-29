@@ -371,3 +371,123 @@ def test_release_waits_for_worker_when_publication_fails_before_result(config):
         pool.release(prepared)
         assert prepared.future.done()
         assert not list(Path(pool.temp.name).iterdir())
+
+
+@pytest.mark.parametrize("allow_ucl", [False, True])
+def test_richer_duplicate_retries_failed_oa_candidate_without_cache_race(
+    config, monkeypatch, allow_ucl
+):
+    from papr.fetchers import fetch_pdf, oa
+
+    calls = []
+    active = set()
+    guard = threading.Lock()
+
+    def prepare(item):
+        if item == "other":
+            return Article("Other", doi="10.1000/other", oa_pdf_url="other.pdf"), None, True
+        url = "working.pdf" if item == "rich" else None
+        return Article("Same", doi="10.1000/same", oa_pdf_url=url), None, True
+
+    def fetch_oa(article, destination, config):
+        with guard:
+            assert article.doi not in active, "same-cache workers overlapped"
+            active.add(article.doi)
+        try:
+            calls.append((article.doi, article.oa_pdf_url))
+            if not article.oa_pdf_url:
+                threading.Event().wait(timeout=0.02)
+                return None
+            destination.write_bytes(f"%PDF-{article.oa_pdf_url}".encode())
+            return article.oa_pdf_url
+        finally:
+            with guard:
+                active.remove(article.doi)
+
+    def browser(*args, **kwargs):
+        pytest.fail("A richer open-access candidate must precede browser fallback")
+
+    monkeypatch.setattr(oa, "fetch", fetch_oa)
+    with Prefetch(
+        ["weak", "rich", "other", "weak"], prepare, fetch_pdf, config, jobs=3, refresh=True
+    ) as pool:
+        for index, prepared in enumerate(pool):
+            if index == 0 and not allow_ucl:
+                with pytest.raises(PdfUnavailable):
+                    pool.result(prepared, allow_ucl=False, ucl_fetch=browser)
+            else:
+                path, source = pool.result(prepared, allow_ucl=allow_ucl, ucl_fetch=browser)
+                expected = "other.pdf" if prepared.item == "other" else "working.pdf"
+                assert source == expected
+                assert path.read_bytes() == f"%PDF-{expected}".encode()
+            pool.release(prepared)
+    assert sorted(calls, key=lambda call: str(call)) == sorted(
+        [("10.1000/same", None), ("10.1000/same", "working.pdf"), ("10.1000/other", "other.pdf")],
+        key=lambda call: str(call),
+    )
+
+
+def test_richer_duplicate_reuses_success_even_when_refreshing(config, monkeypatch):
+    from papr.fetchers import fetch_pdf, oa
+
+    calls = []
+
+    def prepare(item):
+        return Article("Same", doi="10.1000/same", oa_pdf_url=f"{item}.pdf"), None, True
+
+    def fetch_oa(article, destination, config):
+        calls.append(article.oa_pdf_url)
+        destination.write_bytes(b"%PDF-first-success")
+        return "first-success"
+
+    monkeypatch.setattr(oa, "fetch", fetch_oa)
+    with Prefetch(
+        ["first", "different", "first", "third"], prepare, fetch_pdf, config, jobs=2, refresh=True
+    ) as pool:
+        for prepared in pool:
+            path, source = pool.result(prepared, allow_ucl=False, ucl_fetch=None)
+            assert source == "first-success"
+            assert path.read_bytes() == b"%PDF-first-success"
+            pool.release(prepared)
+    assert calls == ["first.pdf"]
+
+
+def test_cli_later_duplicate_with_new_pdf_url_succeeds(config, monkeypatch, tmp_path):
+    from papr.fetchers import oa
+
+    calls = []
+
+    def resolve(item, *args, **kwargs):
+        return Article(
+            "Same", doi="10.1000/same", oa_pdf_url="working.pdf" if item == "rich" else None
+        ), None
+
+    def fetch_oa(article, destination, config):
+        calls.append(article.oa_pdf_url)
+        if not article.oa_pdf_url:
+            return None
+        destination.write_bytes(b"%PDF-later-candidate")
+        return article.oa_pdf_url
+
+    monkeypatch.setattr(cli, "_resolve_item", resolve)
+    monkeypatch.setattr(oa, "fetch", fetch_oa)
+    report = tmp_path / "report.json"
+    args = cli._get_parser().parse_args(
+        [
+            "weak",
+            "rich",
+            "weak",
+            "--jobs",
+            "2",
+            "--oa-only",
+            "--refresh",
+            "--quiet",
+            "--report",
+            str(report),
+        ]
+    )
+    assert cli._run_get(args, config) == 1
+    rows = json.loads(report.read_text())
+    assert [row["status"] for row in rows] == ["error", "ok", "ok"]
+    assert Path(rows[1]["outputs"][0]).read_bytes() == b"%PDF-later-candidate"
+    assert calls == [None, "working.pdf"]
