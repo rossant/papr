@@ -58,6 +58,8 @@ class Prefetch:
         self.futures: dict[Path, tuple[Future, EventBuffer]] = {}
         self.fallbacks: dict[Future, tuple[Path, str] | Exception] = {}
         self.fallback_durations: dict[Future, float] = {}
+        self.staged_paths: dict[Future, Path] = {}
+        self.cache_paths: dict[Future, Path] = {}
 
     def __enter__(self):
         self.temp = tempfile.TemporaryDirectory(prefix="papr-prefetch-")
@@ -104,6 +106,8 @@ class Prefetch:
                                     prepared.fetch_events,
                                 )
                                 self.futures[key] = future, prepared.fetch_events
+                                self.staged_paths[future] = destination
+                                self.cache_paths[future] = key
                             prepared.future, prepared.fetch_events = self.futures[key]
                     except Exception as exc:
                         prepared.resolve_duration = perf_counter() - prepared.started
@@ -144,6 +148,8 @@ class Prefetch:
                         break
                     prepared.fetch_events.replay()
         except PdfUnavailable:
+            # A failed worker may have left partial staging. It is finished now.
+            self.staged_paths[future].unlink(missing_ok=True)
             prepared.fetch_events.replay()
             if not allow_ucl:
                 raise
@@ -161,7 +167,35 @@ class Prefetch:
         finally:
             # Only the coordinator touches the live reporter.
             prepared.fetch_events.replay()
-        return result
+        path, source = result
+        if not path.exists():
+            # Earlier input rows may already have published and released this
+            # shared acquisition. The state lock protects its canonical cache.
+            path = self.cache_paths[future]
+            if not _is_local_pdf(path):
+                raise PdfUnavailable("The prefetched PDF is no longer available in cache")
+        return path, source
+
+    def release(self, prepared: PreparedItem) -> None:
+        """Remove completed staging after publication, retaining the cache for duplicates.
+
+        Only the coordinator calls this. Futures and their source metadata remain
+        available for run-scoped single-flight, including when refresh is enabled.
+        """
+        future = prepared.future
+        if future is None:
+            return
+        if not future.done():
+            # Publication can fail before result() is reached. Finish this
+            # acquisition before admitting more work or removing its staging.
+            try:
+                future.result()
+            except Exception:
+                pass
+        self.staged_paths[future].unlink(missing_ok=True)
+        fallback = self.fallbacks.get(future)
+        if isinstance(fallback, tuple):
+            fallback[0].unlink(missing_ok=True)
 
     def timings(self, prepared: PreparedItem) -> dict[str, float]:
         """Actual stage work; item duration includes time in the bounded queue.

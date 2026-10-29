@@ -283,3 +283,91 @@ def test_event_buffer_bounds_and_coalesces_download_updates():
     for count in range(1000):
         buffer.event("fetch", f"Trying source {count}")
     assert len(buffer.events) == 128
+
+
+@pytest.mark.parametrize("use_ucl", [False, True])
+def test_staging_is_bounded_and_late_duplicates_reuse_cache(config, monkeypatch, use_ucl):
+    from papr.fetchers import fetch_pdf, oa
+
+    oa_calls = []
+    ucl_calls = []
+
+    def prepare(item):
+        return Article(f"Paper {item}", doi=f"10.1000/{item}"), None, True
+
+    def fetch_oa(article, destination, config):
+        oa_calls.append(article.doi)
+        if use_ucl:
+            return None
+        destination.write_bytes(b"%PDF-open-access")
+        return "oa:test"
+
+    def fetch_ucl(article, destination, config):
+        ucl_calls.append(article.doi)
+        destination.write_bytes(b"%PDF-institutional")
+        return "ucl:test"
+
+    monkeypatch.setattr(oa, "fetch", fetch_oa)
+    items = [str(index) for index in range(30)] + ["0"]
+    with Prefetch(items, prepare, fetch_pdf, config, jobs=2, refresh=True) as pool:
+        directory = Path(pool.temp.name)
+        first_path = None
+        for index, prepared in enumerate(pool):
+            path, source = pool.result(prepared, allow_ucl=True, ucl_fetch=fetch_ucl)
+            assert path.read_bytes().startswith(b"%PDF-")
+            assert source == ("ucl:test" if use_ucl else "oa:test")
+            assert len(list(directory.glob("*.pdf"))) <= 2
+            if index == 0:
+                first_path = path
+            if index == len(items) - 1:
+                assert path.parent == config.cache_dir / "pdf"
+            pool.release(prepared)
+            assert not first_path.exists()
+            assert len(list(directory.glob("*.pdf"))) <= 1
+        assert not list(directory.iterdir())
+    assert len(oa_calls) == 30
+    assert len(ucl_calls) == (30 if use_ucl else 0)
+    assert len(list((config.cache_dir / "pdf").glob("*.pdf"))) == 30
+
+
+def test_release_cleans_failed_worker_staging_and_preserves_later_failure(config):
+    calls = []
+
+    def prepare(item):
+        return Article(item), None, True
+
+    def fetch(article, destination, config, **kwargs):
+        calls.append(article.title)
+        destination.write_bytes(b"partial-download")
+        raise OSError("Download interrupted")
+
+    with Prefetch(["same"] * 20, prepare, fetch, config, jobs=2, refresh=True) as pool:
+        directory = Path(pool.temp.name)
+        for prepared in pool:
+            with pytest.raises(OSError, match="interrupted"):
+                pool.result(prepared, allow_ucl=False, ucl_fetch=None)
+            pool.release(prepared)
+            assert not list(directory.iterdir())
+    assert calls == ["same"]
+
+
+def test_release_waits_for_worker_when_publication_fails_before_result(config):
+    started = threading.Event()
+
+    def prepare(item):
+        return Article(item), None, True
+
+    def fetch(article, destination, config, **kwargs):
+        destination.write_bytes(b"%PDF-in-progress")
+        started.set()
+        threading.Event().wait(timeout=0.03)
+        assert destination.exists(), "staging was removed while the worker was active"
+        destination.write_bytes(b"%PDF-finished")
+        return "oa"
+
+    with Prefetch(["paper"], prepare, fetch, config, jobs=2) as pool:
+        prepared = next(iter(pool))
+        assert started.wait(timeout=3)
+        pool.release(prepared)
+        assert prepared.future.done()
+        assert not list(Path(pool.temp.name).iterdir())

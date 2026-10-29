@@ -576,6 +576,8 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                         print(f"  Saved: {path}", file=sys.stderr)
                 row.update(status="error", error=str(exc))
             finally:
+                if prefetch is not None:
+                    prefetch.release(prepared)
                 row.update(reporter.finish_item(row.get("status", "error")))
                 if prefetch is not None:
                     row["timings"].update(prefetch.timings(prepared))
