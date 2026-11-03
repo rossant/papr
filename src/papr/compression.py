@@ -52,24 +52,10 @@ def _signed(reader: PdfReader) -> bool:
     return False
 
 
-def _command(backend: str, executable: str, source: Path, output: Path, dpi: int) -> list[str]:
-    if backend == "qpdf":
-        return [
-            executable, "--object-streams=generate", "--stream-data=compress",
-            "--recompress-flate", "--compression-level=9", str(source.resolve()), str(output),
-        ]
+def _command(executable: str, source: Path, output: Path) -> list[str]:
     return [
-        executable, "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dQUIET", "-sDEVICE=pdfwrite",
-        "-dCompatibilityLevel=1.7", "-dEmbedAllFonts=true", "-dSubsetFonts=true",
-        "-dDetectDuplicateImages=true", "-dCompressFonts=true", "-dCompressPages=true",
-        "-dPassThroughJPEGImages=true", "-dPassThroughJPXImages=true",
-        "-dDownsampleColorImages=true", "-dColorImageDownsampleType=/Bicubic",
-        f"-dColorImageResolution={dpi}", "-dColorImageDownsampleThreshold=1.5",
-        "-dDownsampleGrayImages=true", "-dGrayImageDownsampleType=/Bicubic",
-        f"-dGrayImageResolution={dpi}", "-dGrayImageDownsampleThreshold=1.5",
-        "-dDownsampleMonoImages=true", "-dMonoImageDownsampleType=/Subsample",
-        "-dMonoImageResolution=600", "-dMonoImageDownsampleThreshold=1.5",
-        f"-sOutputFile={output}", "-f", str(source.resolve()),
+        executable, "--object-streams=generate", "--stream-data=compress",
+        "--recompress-flate", "--compression-level=9", str(source.resolve()), str(output),
     ]
 
 
@@ -117,8 +103,6 @@ def compress_pdf(
     backends = []
     if image_ready:
         backends.append(("pymupdf", None, info))
-    elif policy.profile != "lossless" and not protected and (gs := shutil.which("gs")):
-        backends.append(("ghostscript", gs, {"version": tool_version(gs)}))
     if qpdf := shutil.which("qpdf"):
         backends.append(("qpdf", qpdf, {"version": tool_version(qpdf)}))
     backends.append(("pypdf", None, {"version": pypdf_version()}))
@@ -140,7 +124,7 @@ def compress_pdf(
     fallback = None
     if policy.profile != "lossless" and not image_ready:
         fallback = (info or {}).get("eligibility_note") or (
-            "Image compression extra unavailable; using legacy or lossless fallback"
+            "Image compression extra unavailable; using lossless fallback"
         )
     reasons = []
     last_backend = None
@@ -165,14 +149,11 @@ def compress_pdf(
                 _lossless(pdf, temporary)
             else:
                 result = subprocess.run(
-                    _command(backend, executable, pdf, temporary, policy.dpi),
+                    _command(executable, pdf, temporary),
                     capture_output=True, timeout=config.pdf_compression_timeout, check=False,
                 )
                 if result.returncode not in ({0, 3} if backend == "qpdf" else {0}):
                     raise RuntimeError(f"{backend} exited with status {result.returncode}")
-                if backend == "ghostscript":
-                    metadata["lossy_applied"] = None
-                    metadata["image_policy"] = "legacy Ghostscript; image changes uncounted"
             metadata["validation"] = validate_compression(pdf, temporary)
             successful = True
             size = temporary.stat().st_size
