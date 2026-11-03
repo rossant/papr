@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from papr import zotero
+from papr import zotero, zotero_attachments
 from papr.config import Config
 from papr.model import Article, Person
 
@@ -454,7 +454,7 @@ def test_group_existing_duhaime_pdf_uses_only_group_reads_and_no_writes(environm
     server.item("ATTACH12", {"itemType": "attachment", "parentItem": "7J33HWRW",
                               "contentType": "application/pdf", "filename": pdf.name,
                               "linkMode": "imported_file", "local": str(pdf),
-                              "md5": zotero._digest(pdf)})
+                              "md5": zotero_attachments.digest(pdf)})
     result = zotero.save(article, pdf, config, interactive=False)
     assert result["status"] == "already-present"
     assert result["item_key"] == "7J33HWRW"
@@ -579,8 +579,8 @@ def test_group_existing_original_pdf_remains_authoritative_despite_compressed_ha
     server.item("EXISTPDF", {"itemType": "attachment", "parentItem": "7J33HWRW",
                               "contentType": "application/pdf", "filename": original.name,
                               "linkMode": "imported_file", "local": str(original),
-                              "md5": zotero._digest(original)})
-    assert zotero._digest(original) != zotero._digest(pdf)
+                              "md5": zotero_attachments.digest(original)})
+    assert zotero_attachments.digest(original) != zotero_attachments.digest(pdf)
     result = zotero.save(article, pdf, config, interactive=False)
     assert result["status"] == "already-present"
     assert result["attachment_key"] == "EXISTPDF"

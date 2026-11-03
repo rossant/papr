@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from .config import Config
-from .resolvers import zolit, zolit_sbs, zotero
+from .resolvers import zolit, zolit_sbs, zotero_sqlite
 
 
 @dataclass(frozen=True)
@@ -48,11 +48,11 @@ def _zotero_status(config: Config, *, check: bool = False) -> SourceStatus:
                     unavailable = "local API disabled in Zotero"
         except httpx.HTTPError:
             pass
-    data_dir = zotero.find_data_dir(config)
+    data_dir = zotero_sqlite.find_data_dir(config)
     if data_dir:
         if check:
             try:
-                conn = zotero._snapshot(data_dir / "zotero.sqlite")
+                conn = zotero_sqlite.snapshot(data_dir / "zotero.sqlite")
                 try:
                     conn.execute("select count(*) from items").fetchone()
                     if config.zotero_group_id is not None:

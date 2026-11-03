@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from papr.config import Config
-from papr.resolvers import zolit, zolit_sbs, zotero
+from papr.resolvers import zolit, zolit_sbs, zotero, zotero_api, zotero_sqlite
 from papr.resolvers.session import resolution_session
 
 
@@ -274,7 +274,7 @@ def test_zotero_batch_reuses_snapshot_and_bulk_attachment_query(tmp_path, monkey
     data_dir = tmp_path / "Zotero"
     data_dir.mkdir()
     _make_zotero_db(data_dir / "zotero.sqlite")
-    original = zotero._snapshot
+    original = zotero_sqlite.snapshot
     snapshots = []
     queries = []
 
@@ -284,7 +284,7 @@ def test_zotero_batch_reuses_snapshot_and_bulk_attachment_query(tmp_path, monkey
         conn.set_trace_callback(queries.append)
         return conn
 
-    monkeypatch.setattr(zotero, "_snapshot", snapshot)
+    monkeypatch.setattr(zotero_sqlite, "snapshot", snapshot)
     config = Config(zotero_api_url="", zotero_data_dir=data_dir)
     with resolution_session():
         first = zotero.search_sqlite("Jenny 2006", config)
@@ -303,18 +303,18 @@ def test_zotero_locked_snapshot_stops_retrying(tmp_path, monkeypatch):
     _make_zotero_db(path)
     writer = sqlite3.connect(path)
     writer.execute("begin exclusive")
-    monkeypatch.setattr(zotero, "SNAPSHOT_TIMEOUT_SECONDS", 0.1)
-    monkeypatch.setattr(zotero, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(zotero_sqlite, "SNAPSHOT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(zotero_sqlite, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
     started = time.monotonic()
     try:
         with pytest.raises(sqlite3.OperationalError, match="snapshot timed out"):
-            zotero._snapshot(path)
+            zotero_sqlite.snapshot(path)
         assert time.monotonic() - started < 1.0
     finally:
         writer.rollback()
         writer.close()
     # A failed snapshot must release its connection and allow subsequent reads.
-    conn = zotero._snapshot(path)
+    conn = zotero_sqlite.snapshot(path)
     assert conn.execute("select count(*) from items").fetchone()[0] == 2
     conn.close()
 
@@ -346,7 +346,7 @@ def test_zotero_batch_does_not_retry_unavailable_snapshot(tmp_path, monkeypatch)
         attempts.append(path)
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(zotero, "_snapshot", unavailable)
+    monkeypatch.setattr(zotero_sqlite, "snapshot", unavailable)
     config = Config(zotero_api_url="", zotero_data_dir=tmp_path)
     with resolution_session():
         assert zotero.search_sqlite("Jenny 2006", config) == []
@@ -360,8 +360,8 @@ def test_zotero_batch_does_not_retry_unavailable_snapshot(tmp_path, monkeypatch)
 def test_zotero_api_attachment_budget_preserves_metadata(monkeypatch):
     clock = [0.0]
     requested = []
-    monkeypatch.setattr(zotero.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(zotero, "API_BUDGET_SECONDS", 0.5)
+    monkeypatch.setattr(zotero_api.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(zotero_api, "API_BUDGET_SECONDS", 0.5)
 
     def get(self, url, **kwargs):
         requested.append(url)
@@ -524,7 +524,7 @@ def test_zotero_pdf_precedes_all_online_metadata(tmp_path, monkeypatch, query):
     monkeypatch.setattr(resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi,))
     monkeypatch.setattr(resolvers, "LOCAL_PMID_LOOKUPS", (zotero.by_pmid,))
     # Even a configured remote Zotero API must wait for the SQLite attachment.
-    monkeypatch.setattr(zotero, "_api_articles", unexpected)
+    monkeypatch.setattr(zotero_api, "articles", unexpected)
     monkeypatch.setattr(resolvers.crossref, "by_doi", unexpected)
     monkeypatch.setattr(resolvers.openalex, "by_doi", unexpected)
     monkeypatch.setattr(resolvers.pubmed, "by_pmid", unexpected)
@@ -561,8 +561,8 @@ def test_zotero_metadata_api_does_not_hide_sqlite_attachment(tmp_path, monkeypat
     pdf = storage / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.7\n")
     monkeypatch.setattr(
-        zotero,
-        "_api_articles",
+        zotero_api,
+        "articles",
         lambda *args: [zotero.from_api_item({"title": "A Jenny paper", "DOI": "10.1000/jenny"})],
     )
     cfg = Config(zotero_data_dir=tmp_path)

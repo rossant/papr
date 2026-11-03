@@ -5,6 +5,7 @@ import pytest
 from papr import resolvers
 from papr.config import Config
 from papr.model import Article, Person
+from papr.resolvers import zotero_sqlite
 
 
 def _jenny(title: str, doi: str | None = "10.1000/jenny") -> Article:
@@ -469,7 +470,7 @@ def test_all_offline_sources_precede_hosted_zotero(tmp_path, monkeypatch, query)
         raise AssertionError("Offline sources must be checked before the hosted Zotero API")
 
     monkeypatch.setattr(httpx.Client, "get", get)
-    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [])
+    monkeypatch.setattr(zotero_sqlite, "all_articles", lambda config: [])
     monkeypatch.setattr(
         resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi, lambda *args: zolit_article)
     )
@@ -531,7 +532,7 @@ def test_hosted_zotero_fallback_is_available_after_offline_preflight(
         return httpx.Response(200, json=data, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.Client, "get", get)
-    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [])
+    monkeypatch.setattr(zotero_sqlite, "all_articles", lambda config: [])
     monkeypatch.setattr(
         resolvers, "LOCAL_DOI_LOOKUPS", (zotero.by_doi, lambda *args: local_article)
     )
@@ -592,7 +593,7 @@ def test_imported_article_finds_local_pdf_without_external_calls(tmp_path, monke
         raise AssertionError("Imported article's local PDF must precede online metadata")
 
     monkeypatch.setattr(httpx.Client, "get", get)
-    monkeypatch.setattr(zotero, "_sqlite_all", lambda config: [local_article])
+    monkeypatch.setattr(zotero_sqlite, "all_articles", lambda config: [local_article])
     monkeypatch.setattr(resolvers, "LOCAL_PMID_LOOKUPS", (zotero.by_pmid,))
     monkeypatch.setattr(resolvers, "LOCAL_SEARCHERS", (zotero.search,))
     monkeypatch.setattr(resolvers.pubmed, "by_pmid", lambda *args: requests.append("pubmed"))

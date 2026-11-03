@@ -40,8 +40,8 @@ def test_zotero_check_detects_locked_sqlite(tmp_path, monkeypatch):
         conn.execute("create table items (itemID integer)")
     writer = sqlite3.connect(path)
     writer.execute("begin exclusive")
-    monkeypatch.setattr("papr.sources.zotero.SNAPSHOT_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr("papr.sources.zotero.SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("papr.sources.zotero_sqlite.SNAPSHOT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("papr.sources.zotero_sqlite.SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
     try:
         assert (
             _zotero_status(Config(zotero_api_url="", zotero_data_dir=tmp_path), check=True).state
