@@ -334,7 +334,12 @@ papr login ucl
 ```
 
 `papr` opens Chrome/Chromium with a persistent profile. Complete UCL SSO/MFA in
-the browser, return to the terminal, and press Enter. No UCL password is stored.
+the browser, return to the terminal, and press Enter. It checks that a proxied
+article opens before confirming success; if sign-in is incomplete, the window
+stays open. It explicitly saves authentication state, including session cookies,
+in an owner-only `session.json` inside the browser profile and restores it in
+future visible or headless runs. No UCL password is stored by papr. UCL can expire
+the session or require MFA again; rerun `papr login ucl` when that happens.
 
 If Chrome/Chromium is unavailable:
 
@@ -356,12 +361,16 @@ papr DOI --show-browser
 ```
 
 This reuses papr's saved profile and closes that Chrome process after retrieval.
+It runs automatic download attempts, so windows can open and close for each paper.
+Use the separate `papr login ucl` command to complete sign-in before retrying a
+batch; that command waits for your confirmation and verifies access before closing.
 It also tries a known PMC article directly before the institutional publisher
 route, and can retrieve a PDF already loaded in Chrome's inline viewer. Visible
 mode waits up to 60 seconds for you to complete a reCAPTCHA; it never solves one
 automatically. The default browser fallback remains headless.
 
-PDF errors distinguish browser automation rejection (`RR-16`), browser
+PDF errors distinguish browser automation rejection (`RR-16`), Springer JavaScript
+challenges, browser
 verification, and a country mismatch between an institutional proxy and a PDF
 CDN. A valid library login does not ensure that every CDN host is correctly
 proxied. For these failures, try another original PDF location or a repository
@@ -514,7 +523,8 @@ allows metadata requests while preserving a valid supplied PDF; `--local-only`
 still forbids external resolution. Ambiguous local matches can require further
 metadata or interactive selection. Once resolved, a valid local attachment wins
 over the PDF cache, followed by known direct OA/PMC URLs, Unpaywall discovery,
-publisher/DOI links, and finally UCL. `--refresh` bypasses the PDF cache but keeps
+published repository copies, publisher/DOI links, and finally UCL.
+`--refresh` bypasses the PDF cache but keeps
 valid local attachments; `--no-local` disables library lookup.
 
 Requests reuse a command-scoped HTTP client with at most two active responses per
@@ -551,6 +561,8 @@ papr batch check batch.json
 papr batch export batch.json -o ~/Downloads
 papr batch export batch.json -o ~/Dropbox --dry-run
 papr batch resume reading
+papr batch retry reading --dry-run
+papr batch retry reading --non-interactive --report retry-report.json
 papr next-refs.txt --exclude-delivered batch.json --manifest next-batch.json
 ```
 
@@ -570,6 +582,19 @@ not retry Zotero imports. Export and resume create a new manifest unless
 `--manifest` explicitly selects a path; `--name` names the result, and otherwise
 the original name is retained. Use the new manifest's ID for the next retry if
 retaining the name makes it ambiguous.
+
+`retry` performs remote resolution/downloads for items that failed at the resolve
+or fetch stage. It keeps all items in their original order, retaining successful
+outputs, earlier acquisition attempts, and any bibliography files already saved.
+It uses the previous output directory unless `-o` selects another directory;
+existing files are preserved unless `--overwrite` is explicit. The default retry
+format is PDF; `-f` can also request bibliography formats. It does not rerun text
+processors or Zotero writes, and leaves input-file, processing, and Zotero failures
+untouched. `--oa-only`, `--show-browser`, `--jobs`, and `--non-interactive` control
+retrieval as on an ordinary fetch. Its dry run does not resolve references, access
+the network, or save reports/manifests. A real retry saves a new combined manifest
+unless `--manifest` explicitly selects a destination. Remaining failures still
+produce a non-zero exit code.
 
 `--exclude-delivered` is repeatable and also works with `papr batch export`.
 It matches successful PDF exports by all available DOI, PMID and library/item-key
@@ -676,15 +701,30 @@ resolved article title on the first selected page, and checks the page count
 against the journal pagination when available. A failed check leaves any existing
 cache entry untouched. Source file hashes, the selected page range, and the public
 archive URL are recorded under papr's data directory in `pdf-sources/`.
-The source PDF is preserved. Archive/thesis discovery is not automatic; this
-command makes an explicitly verified recovery reusable by ordinary DOI requests.
+The source PDF is preserved. This command makes an explicitly verified recovery
+reusable by ordinary DOI requests.
+
+To get leads for manual recovery without downloading or caching a PDF:
+
+```bash
+papr cache discover 10.1016/j.pediatrneurol.2019.01.015
+papr cache discover 10.1016/j.pediatrneurol.2019.01.015 --json
+```
+
+Discovery lists public record URLs attached to the exact DOI in OpenAlex, then
+checks up to five dissertations for each of the first three indexed authors.
+Every lead is unverified. A dissertation citing the indexed article or matching
+its title/abstract terms is distinguished from a weaker author-only connection.
+An author-only connection does not establish that the thesis contains the paper.
+Index coverage can be incomplete; inspect the source and choose pages explicitly
+with `cache import` before using it as a recovered original.
 
 After known sources and Unpaywall locations fail, papr queries OpenAlex for
 repository PDFs and landing pages linked to the exact requested DOI. This
 discovery accepts only locations marked `publishedVersion`, so a submitted or
 accepted manuscript is not selected by this fallback. It also works when a local
-bibliography record contains no remote PDF links. Thesis discovery and selection
-of article pages within a thesis remain manual.
+bibliography record contains no remote PDF links. Thesis leads require the
+explicit discovery command above; selecting article pages remains manual.
 
 Downloaded candidates are checked before entering the PDF cache: they must have
 an end-of-file marker, parse successfully, and contain readable pages and content
