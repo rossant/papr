@@ -12,7 +12,8 @@ from pathlib import Path
 from .batches import identities, identity, record_artifacts
 from .config import Config
 from .export import ExportError, output_suffix
-from .fetchers import ucl
+from .fetchers import PdfUnavailable, ucl
+from .fetchers.diagnostics import PdfAccessError
 from .filename import collision_safe_path
 from .history import record_download
 from .model import Article
@@ -185,15 +186,18 @@ class GetPipeline:
         prepared_pdf: Path,
         source: str,
         row: dict,
+        *,
+        formats: list[str] | None = None,
     ) -> list[Path]:
         emit("export", "Preparing outputs")
-        options = {"pdf_output": prepared_pdf} if "pdf" in self.formats else {}
+        formats = self.formats if formats is None else formats
+        options = {"pdf_output": prepared_pdf} if "pdf" in formats else {}
         export_error = None
         try:
             outputs, processor = self.services.export_outputs(
                 article,
                 pdf,
-                self.formats,
+                formats,
                 self.output_dir,
                 self.config,
                 filename_template=self.args.filename,
@@ -215,6 +219,37 @@ class GetPipeline:
             raise export_error
         return outputs
 
+    def save_without_pdf(self, article: Article, temporary: Path, row: dict) -> None:
+        """Keep requested metadata and Zotero results without masking acquisition failure."""
+        from .zotero import save
+
+        row.update(pdf_status="unavailable", outputs=[], source="metadata")
+        formats = [value for value in self.formats if value not in {"pdf", "md", "txt"}]
+        if formats:
+            try:
+                self.publish(
+                    article, temporary / "unused.pdf", temporary / "unused.pdf",
+                    "metadata", row, formats=formats,
+                )
+            except Exception as exc:
+                row["metadata_export_error"] = str(exc)
+            finally:
+                if row.get("outputs"):
+                    row["export_status"] = "partial"
+        try:
+            row["zotero"] = save(
+                article, None, self.config,
+                collection=self.args.collection, interactive=self.interactive,
+            )
+        except Exception as exc:
+            row["zotero"] = {"status": "error", "metadata_only": True, "error": str(exc)}
+        with pause():
+            saved = row["zotero"]
+            if saved["status"] == "error":
+                print(f"✗ Zotero metadata: {saved['error']}")
+            else:
+                print(f"✓ Zotero: {saved['status']} — metadata only; PDF unavailable")
+
     def export(
         self,
         article: Article,
@@ -225,7 +260,15 @@ class GetPipeline:
     ) -> None:
         with tempfile.TemporaryDirectory(prefix="papr-") as directory:
             temporary = Path(directory)
-            pdf, source = self.fetch(article, local_pdf, temporary, prepared, prefetch)
+            try:
+                pdf, source = self.fetch(article, local_pdf, temporary, prepared, prefetch)
+            except (PdfUnavailable, PdfAccessError):
+                if self.args.zotero:
+                    self.save_without_pdf(article, temporary, row)
+                    # The original error and stage remain the batch failure, even
+                    # when metadata publication and Zotero reconciliation succeed.
+                    emit("fetch", "PDF unavailable; metadata recovery completed")
+                raise
             prepared_pdf = pdf
             if "pdf" in self.formats or self.args.zotero:
                 from .compression import compress_pdf

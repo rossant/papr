@@ -103,7 +103,10 @@ def _get_parser() -> argparse.ArgumentParser:
         metavar="MANIFEST",
         help="exclude works with successful PDF exports in a previous manifest (repeatable)",
     )
-    p.add_argument("--zotero", action="store_true", help="save the paper and PDF to Zotero")
+    p.add_argument(
+        "--zotero", action="store_true",
+        help="save the paper and PDF to Zotero; save metadata if the PDF is unavailable",
+    )
     p.add_argument("--collection", help="Zotero collection name or key (with --zotero)")
     p.add_argument("--no-compress", action="store_true", help="export the original PDF")
     p.add_argument(

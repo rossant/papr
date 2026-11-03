@@ -158,15 +158,17 @@ def library_info(config: Config) -> dict:
 
 
 def save(
-    article: Article, pdf: Path, config: Config, *, collection: str | None = None,
+    article: Article, pdf: Path | None, config: Config, *, collection: str | None = None,
     interactive: bool = True,
 ) -> dict:
-    """Add or reuse a bibliography entry and store the supplied (already compressed) PDF."""
-    if not pdf.is_file():
-        raise ZoteroError("The PDF to save in Zotero does not exist")
-    if pdf.stat().st_size >= 4 * 1024**3:
-        raise ZoteroError("Zotero requires attachments smaller than 4 GB")
-    md5 = zotero_attachments.digest(pdf)
+    """Add or reuse a reference, optionally attaching an already compressed PDF."""
+    md5 = None
+    if pdf is not None:
+        if not pdf.is_file():
+            raise ZoteroError("The PDF to save in Zotero does not exist")
+        if pdf.stat().st_size >= 4 * 1024**3:
+            raise ZoteroError("Zotero requires attachments smaller than 4 GB")
+        md5 = zotero_attachments.digest(pdf)
     emit("zotero", "Checking Zotero for an existing paper")
     try:
         with httpx.Client(timeout=15.0, follow_redirects=False, trust_env=False) as client:
@@ -189,26 +191,33 @@ def save(
                     headers={"If-Unmodified-Since-Version": str(version)},
                     json={"collections": [*current.get("collections", []), collection_key]},
                 )
-            attachment, present = zotero_attachments.ensure_attachment(
-                api, object_key(parent), pdf, md5,
-                reuse_existing_pdf=api.group_id is not None and not added,
-            )
-            if not present:
-                zotero_attachments.upload(api, attachment, pdf, md5)
             result = {
-                "status": "added" if added else ("already-present" if present else "attached"),
-                "item_key": object_key(parent), "attachment_key": object_key(attachment),
+                "status": "added" if added else "already-present",
+                "item_key": object_key(parent),
                 "collection": collection_name, "collection_key": collection_key,
             }
+            if pdf is None:
+                result["metadata_only"] = True
+            else:
+                attachment, present = zotero_attachments.ensure_attachment(
+                    api, object_key(parent), pdf, md5,
+                    reuse_existing_pdf=api.group_id is not None and not added,
+                )
+                if not present:
+                    zotero_attachments.upload(api, attachment, pdf, md5)
+                    if not added:
+                        result["status"] = "attached"
+                result["attachment_key"] = object_key(attachment)
             if api.group_id is not None:
                 result.update(group_id=api.group_id, library=api.library_name)
             return result
     except httpx.HTTPError:
         raise ZoteroError(
-            "Could not communicate with Zotero. Open Zotero and enable its local API; "
-            "the downloaded PDF is preserved"
+            "Could not communicate with Zotero. Open Zotero and enable its local API"
+            + ("; the downloaded PDF is preserved" if pdf is not None else "")
         ) from None
     except (ValueError, KeyError, TypeError, AttributeError):
         raise ZoteroError(
-            "Zotero returned an invalid response; the downloaded PDF is preserved"
+            "Zotero returned an invalid response"
+            + ("; the downloaded PDF is preserved" if pdf is not None else "")
         ) from None
