@@ -289,12 +289,20 @@ HTTP 200 are recognized as access failures, rather than accepted as PDFs.
 ## PDF compression
 
 PDF compression is enabled by default when exporting PDFs or saving them to
-Zotero. Ghostscript targets 200 dpi for color and grayscale images and 600 dpi
-for monochrome images. Only smaller, validated results are used; cached
-optimized copies leave source PDFs untouched, and native extraction and OCR
-continue to use the original. If Ghostscript is unavailable, papr tries
-lossless compression with qpdf or pypdf. Encrypted or signed PDFs are kept
-unchanged; forms and annotations use lossless compression.
+Zotero. The default `balanced` profile targets 180 dpi and quality 80; the
+opt-in `compact` profile targets 120 dpi and quality 65. `lossless` disables
+lossy image rewrites. Image optimization is deliberately conservative: bitonal and CMYK
+images, masks, full-page scans, line art, and already low-resolution images are
+skipped. Only smaller, validated results are used. No profile guarantees that
+fine detail needed for medical paper reading or clinical interpretation is
+preserved. Keep the source PDF when those details matter.
+
+Optimized copies leave source PDFs untouched, and native text extraction, links,
+annotations, and OCR continue to use the original. Compression results are
+cached separately. Encrypted or signed PDFs are kept unchanged. The image
+backend can optimize documents with forms or annotations after checking that
+these are preserved. If the optional image backend is unavailable or untested,
+papr uses lossless compression with qpdf when installed, then pypdf.
 
 Disable compression for one command with `--no-compress`, or set
 `papr config set pdf.compress false`. Configure compression in your personal
@@ -303,7 +311,9 @@ config:
 ```toml
 [pdf]
 compress = true
-dpi = 200
+profile = "balanced" # balanced, compact, lossless
+# dpi = 200           # optional override; otherwise the profile default applies
+# quality = 90        # optional override from 1 to 95
 timeout = 120
 
 [zotero]
@@ -317,20 +327,30 @@ For standalone compression, use `papr compress`:
 papr compress paper.pdf
 papr compress paper1.pdf paper2.pdf -o compressed/
 papr compress -i paper.pdf
-papr compress paper.pdf --dpi 150 --overwrite
+papr compress paper.pdf --profile compact --overwrite
+papr compress paper.pdf --dpi 150 --quality 75 --overwrite
 ```
 
 When compression reduces the file size, the default output is
 `paper.compressed.pdf` beside the source. Otherwise, the original stays unchanged.
 `-o` selects an output directory; `-i` / `--in-place` explicitly replaces the source, and
-`--overwrite` allows replacing an existing destination. `--dpi` overrides the
-image resolution. Multiple files are processed independently, with failures
+`--overwrite` allows replacing an existing destination. `--profile`, `--dpi`,
+and `--quality` select the profile and override its image resolution and JPEG
+quality. Multiple files are processed independently, with failures
 reported while the batch continues; each result reports the size saved.
 
-Ghostscript and qpdf are optional external commands (for example,
-`brew install ghostscript`). Without them, pypdf provides a lossless fallback.
-Compression status and size details are included in JSON batch reports; Zotero
-import results are also included in those reports.
+Install the optional image backend with:
+
+```bash
+uv tool install "papr[compression] @ git+https://github.com/rossant/papr.git"
+```
+
+Without it, papr uses only lossless fallbacks. Ghostscript is not used for
+compression because global image rewrites bypass the image preservation policy.
+JSON batch reports
+include `requested_profile`, `resolved_dpi`, `resolved_quality`,
+`changed_images`, `skipped_images`, `lossy_applied`, `backend_versions`,
+`validation`, and `fallback_reason`; Zotero import results are also included.
 
 ## UCL / EZproxy
 
@@ -686,13 +706,15 @@ papr cache prune
 papr cache prune --dry-run --manifest old-external-batch.json
 ```
 
-Status reports sizes for artifact, PDF, processor and recovered-file caches.
+Status reports sizes for artifact, PDF, processor, recovered-file, and
+compression caches.
 Pruning removes only orphaned artifact objects at least seven days old. It
 protects all known manifests, including externally registered manifests and
 pending exports, plus the latest recorded download. Older external manifests
 that predate the catalog can be protected with repeatable `--manifest` options.
-Missing or malformed protection records stop pruning. The PDF, processor and
-recovered-file caches, browser profiles and exported user files are retained.
+Missing or malformed protection records stop pruning. The PDF, processor,
+compression, and recovered-file caches, browser profiles and exported user files
+are retained.
 
 `--older-than DAYS` changes the grace period; `0` disables it. A dry run lists
 eligible objects without creating files or directories. Pruning and exports
@@ -802,12 +824,11 @@ uv run ruff check .
 uv build
 ```
 
-The base test run does not install the optional UCL browser dependency. To run
-the full suite including Playwright-backed browser unit tests, sync with the
-`ucl` extra:
+The base test run does not install optional UCL browser or image compression
+dependencies. To run browser and compression tests, sync with both extras:
 
 ```bash
-uv sync --locked --extra ucl --dev
+uv sync --locked --extra ucl --extra compression --dev
 uv run pytest
 ```
 
@@ -819,10 +840,10 @@ If `papr` is installed as an editable uv tool, source edits are picked up
 immediately, but dependency changes require reinstalling the tool environment:
 
 ```bash
-uv tool install --force --editable '.[ucl]'
+uv tool install --force --editable '.[ucl,compression]'
 ```
 
-Omit `[ucl]` if you do not use institutional browser access.
+Omit either extra if you do not use that optional feature.
 
 `uv.lock` pins development and test dependencies. Library installations use the
 compatible dependency ranges in `pyproject.toml`; Zolit and zolit-sbs remain

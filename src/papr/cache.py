@@ -15,7 +15,7 @@ from pathlib import Path
 from .config import Config
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_CATEGORIES = ("artifacts", "pdf", "processors", "recovered")
+_CATEGORIES = ("artifacts", "pdf", "processors", "recovered", "compression")
 
 
 def _tree_size(path: Path) -> int:

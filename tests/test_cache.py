@@ -61,6 +61,8 @@ def test_status_reports_only_known_cache_categories(config):
     (config.cache_dir / "artifacts" / ("a" * 64)).write_bytes(b"123")
     (config.cache_dir / "pdf").mkdir()
     (config.cache_dir / "pdf" / "fetch.pdf").write_bytes(b"4567")
+    (config.cache_dir / "compression").mkdir()
+    (config.cache_dir / "compression" / "optimized.pdf").write_bytes(b"89")
     (config.cache_dir / "private").mkdir()
     (config.cache_dir / "private" / "ignored").write_bytes(b"do not count")
     result = status(config)
@@ -69,8 +71,9 @@ def test_status_reports_only_known_cache_categories(config):
         "pdf": 4,
         "processors": 0,
         "recovered": 0,
+        "compression": 2,
     }
-    assert result["total_bytes"] == 7
+    assert result["total_bytes"] == 9
 
 
 def test_prune_protects_history_manifest_artifacts_and_pending(config, monkeypatch):
@@ -219,6 +222,7 @@ def test_dry_run_reports_without_mutation_and_cli_json(config, capsys):
     assert run(["status", "--json"], config) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["categories"]["artifacts"] == len(b"old orphan")
+    assert report["categories"]["compression"] == 0
     assert candidate.exists()
     assert not (config.data_dir / ".state.lock").exists()
 

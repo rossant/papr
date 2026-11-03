@@ -86,6 +86,26 @@ def _pypdf_check(name: str) -> dict[str, str]:
     return _check(name, "healthy", "pypdf available")
 
 
+def _image_backend(timeout: float) -> dict[str, str]:
+    # Probe in the worker so optional native libraries never load in papr's process.
+    from .compression_images import backend_info
+
+    try:
+        info = backend_info(timeout=timeout)
+    except Exception as exc:
+        detail = f"backend probe failed ({type(exc).__name__})"
+        return _check("Image compression", "warning", detail)
+    if not info:
+        return _check(
+            "Image compression", "warning",
+            "optional backend unavailable; install papr[compression]",
+        )
+    if info.get("eligible"):
+        return _check("Image compression", "healthy", "optional image backend available")
+    detail = info.get("eligibility_note") or "image backend is not eligible"
+    return _check("Image compression", "warning", str(detail))
+
+
 def _sources(config: Config) -> list[dict[str, str]]:
     from .sources import statuses
 
@@ -139,6 +159,7 @@ def diagnose(config: Config, *, strict: bool = False, tool_timeout: float = 2.0)
     checks.extend(
         [
             _pypdf_check("PDF compression"),
+            _image_backend(tool_timeout),
             _tool("Ghostscript", shutil.which("gs"), tool_timeout),
             _tool("qpdf", shutil.which("qpdf"), tool_timeout),
             _pypdf_check("PDF text extraction"),

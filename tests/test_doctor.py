@@ -36,6 +36,7 @@ def test_doctor_json_and_human_output_do_not_write_or_reveal_secrets(
     monkeypatch.setattr("papr.sources.statuses", lambda *a, **k: _source_statuses(mistral=True))
     monkeypatch.setenv("MISTRAL_API_KEY", "never-print-this-secret")
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr("papr.compression_images.backend_info", lambda **kwargs: None)
     before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
     assert run(["--json"], config) == 0
     output = capsys.readouterr().out
@@ -54,6 +55,7 @@ def test_optional_services_warn_and_only_strict_mode_fails(config, monkeypatch, 
 
     monkeypatch.setattr("papr.sources.statuses", lambda *a, **k: _source_statuses())
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr("papr.compression_images.backend_info", lambda **kwargs: None)
     assert run([], config) == 0
     assert run(["--strict"], config) == 1
     assert "optional OCR service" in capsys.readouterr().out
@@ -66,6 +68,7 @@ def test_compression_tool_version_timeout_is_optional_warning(config, monkeypatc
     monkeypatch.setattr(
         doctor.shutil, "which", lambda name: "/usr/bin/gs" if name == "gs" else None
     )
+    monkeypatch.setattr("papr.compression_images.backend_info", lambda **kwargs: None)
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
@@ -83,6 +86,7 @@ def test_inaccessible_output_and_config_are_required_errors(config, monkeypatch)
 
     monkeypatch.setattr("papr.sources.statuses", lambda *a, **k: [])
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr("papr.compression_images.backend_info", lambda **kwargs: None)
     monkeypatch.setattr(doctor.os, "access", lambda path, mode: False)
     report = doctor.diagnose(config)
     assert report["status"] == "error"
@@ -101,3 +105,27 @@ def test_dangling_symlink_output_directory_is_unusable(config, tmp_path):
     status, detail = _directory_status(config.download_dir)
     assert status == "error"
     assert "dangling symlink" in detail
+
+
+def test_missing_optional_image_backend_warns_with_extra_install_hint(config, monkeypatch):
+    from papr import doctor
+
+    monkeypatch.setattr("papr.sources.statuses", lambda *a, **k: [])
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr("papr.compression_images.backend_info", lambda **kwargs: None)
+    check = next(item for item in doctor.diagnose(config)["checks"]
+                 if item["name"] == "Image compression")
+    assert check["status"] == "warning"
+    assert "papr[compression]" in check["detail"]
+
+
+def test_image_backend_probe_receives_doctor_timeout(config, monkeypatch):
+    from papr import doctor
+
+    monkeypatch.setattr("papr.sources.statuses", lambda *a, **k: [])
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    calls = []
+    monkeypatch.setattr("papr.compression_images.backend_info",
+                        lambda **kwargs: calls.append(kwargs) or {"eligible": True})
+    doctor.diagnose(config, tool_timeout=0.3)
+    assert calls == [{"timeout": 0.3}]
