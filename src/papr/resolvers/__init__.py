@@ -9,14 +9,14 @@ from typing import TypeVar
 from ..config import Config
 from ..model import Article
 from ..progress import _current, emit
-from . import crossref, openalex, pubmed, zolit, zolit_sbs, zotero
+from . import crossref, exports, openalex, pubmed, zolit, zolit_sbs, zotero
 from .common import deduplicate, extract_doi, extract_pmid, is_local_pdf, local_metadata_config
 
 logger = logging.getLogger(__name__)
 
-LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search)
-LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi, zolit_sbs.by_doi)
-LOCAL_PMID_LOOKUPS = (zotero.by_pmid, zolit.by_pmid, zolit_sbs.by_pmid)
+LOCAL_SEARCHERS = (zotero.search, zolit.search, zolit_sbs.search, exports.search)
+LOCAL_DOI_LOOKUPS = (zotero.by_doi, zolit.by_doi, zolit_sbs.by_doi, exports.by_doi)
+LOCAL_PMID_LOOKUPS = (zotero.by_pmid, zolit.by_pmid, zolit_sbs.by_pmid, exports.by_pmid)
 
 
 def _local_search(query: str, config: Config) -> list[Article]:
