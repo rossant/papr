@@ -16,8 +16,14 @@ from ..resolvers.common import normalize_pmcid
 from . import browser_pdf as _browser_pdf_transport
 from .browser import native_context
 from .candidates import rank_candidate_urls as _rank_candidate_urls
-from .diagnostics import PdfAccessError, access_problem
-from .publishers import publisher_pdf_urls
+from .diagnostics import (
+    PdfAccessError,
+    access_problem,
+    navigation_failure,
+    recovery_for,
+    response_problem,
+)
+from .publishers import canonical_publisher_url, publisher_pdf_urls
 from .ucl_session import VERIFY_URL, restore_session, save_session, verified_article
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
@@ -107,6 +113,7 @@ def _proxy_url(article: Article) -> str:
     target = publisher_url or (f"https://doi.org/{article.doi}" if article.doi else article.url)
     if not target:
         raise RuntimeError("UCL fallback needs a DOI or landing-page URL")
+    target = canonical_publisher_url(target)
     return f"{UCL_LOGIN}?url={quote(target, safe=':/?=&%')}"
 
 
@@ -182,26 +189,38 @@ def fetch(
                     landing, wait_until="domcontentloaded", timeout=90_000
                 )
             except PlaywrightError as exc:
-                record_attempt("ucl", landing, reason="Browser could not open landing page",
-                               recovery="Run papr login ucl or check the publisher URL")
-                problems.append(
-                    "Browser could not open a PDF source. Check the publisher URL "
-                    "or complete institutional login with `papr login ucl`."
-                )
+                failure = navigation_failure(exc)
+                record_attempt("ucl", landing, **failure)
+                problems.append(failure["reason"])
                 logger.debug("PDF landing navigation failed (%s)", type(exc).__name__)
                 continue
+            status = response.status if response and isinstance(response.status, int) else None
+            ctype = response.headers.get("content-type", "") if response else ""
             if response:
-                ctype = response.headers.get("content-type", "")
                 if "application/pdf" in ctype.lower():
                     body = response.body()
                     if is_pdf(body, ctype):
                         if _save_pdf(body, destination, article, response.url):
                             return response.url
+            try:
+                text = page.content()
+            except PlaywrightError:
+                # A client-side redirect can race the initial response. Link
+                # discovery already has its own navigation-aware retry loop.
+                text = ""
+            text = text if isinstance(text, str) else ""
+            problem = response_problem(page.url, text, status)
+            if problem:
+                record_attempt("ucl", page.url, status_code=status, content_type=ctype,
+                               reason=problem, recovery=recovery_for(problem))
+                problems.append(problem)
+                continue
             urls = _candidate_urls(page)
             record_attempt(
-                "ucl", landing, outcome="discovered" if urls else "failed",
+                "ucl", page.url, outcome="discovered" if urls else "failed",
                 reason="Publisher PDF links found" if urls else "No matching PDF links found",
                 recovery=None if urls else "Try another repository or import an original PDF",
+                status_code=status, content_type=ctype,
             )
             browser_headers = {
                 "User-Agent": page.evaluate("() => navigator.userAgent"),
@@ -216,15 +235,19 @@ def fetch(
                         if _save_pdf(body, destination, article, r.url):
                             return r.url
                     else:
-                        problem = access_problem(r.url, body.decode("utf-8", errors="replace"))
+                        problem = response_problem(
+                            r.url, body.decode("utf-8", errors="replace"), r.status,
+                            expect_pdf=True,
+                        )
                         record_attempt(
                             "ucl", r.url, status_code=r.status,
+                            content_type=r.headers.get("content-type", ""),
                             reason=problem or "Browser HTTP response is not a PDF",
-                            recovery="Retry with --show-browser or try another repository",
+                            recovery=recovery_for(problem) if problem
+                            else "Retry with --show-browser or try another repository",
                         )
                 except PlaywrightError as exc:
-                    record_attempt("ucl", url, reason="Browser HTTP request failed",
-                                   recovery="Retry with --show-browser")
+                    record_attempt("ucl", url, **navigation_failure(exc))
                     logger.debug("UCL PDF request failed (%s)", type(exc).__name__)
                 try:
                     source = _browser_pdf_transport.browser_pdf(
@@ -238,8 +261,7 @@ def fetch(
                     emit("fetch", str(exc))
                     continue
                 except PlaywrightError as exc:
-                    record_attempt("browser", url, reason="Browser PDF transfer failed",
-                                   recovery="Try another original PDF source")
+                    record_attempt("browser", url, **navigation_failure(exc))
                     logger.debug("Browser PDF transfer failed (%s)", type(exc).__name__)
                     problems.append("A publisher PDF browser transfer failed; try another source.")
                     continue

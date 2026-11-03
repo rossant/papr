@@ -1,5 +1,6 @@
 """Recognize PDF verification failures without exposing signed download URLs."""
 
+import re
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -11,6 +12,18 @@ def access_problem(url: str, text: str = "") -> str | None:
     parsed = urlsplit(url)
     params = parse_qs(parsed.query)
     lower = text.casefold()
+    if parsed.hostname in {"login.microsoftonline.com", "login.live.com", "shib-idp.ucl.ac.uk"}:
+        return "Institutional sign-in is required before PDF access. Run papr login ucl."
+    challenge_title = re.search(
+        r"<title>\s*(?:just a moment|un instant)[\s.!…]*</title>", lower
+    )
+    if "_cf_chl_opt" in lower or (challenge_title and any(
+        marker in lower for marker in ("cloudflare", "/cdn-cgi/challenge-platform/", "cf-chl-")
+    )):
+        return (
+            "Publisher returned a Cloudflare browser verification challenge. "
+            "Complete verification in a user-assisted browser or try another original source."
+        )
     if "<title>client challenge</title>" in lower and "/_fs-ch-" in lower:
         return (
             "Publisher requires a JavaScript browser challenge before PDF access. "
@@ -37,3 +50,43 @@ def access_problem(url: str, text: str = "") -> str | None:
             "Retry with --show-browser or try another original PDF source."
         )
     return None
+
+
+def response_problem(
+    url: str, text: str, status_code: int | None = None, *, expect_pdf: bool = False,
+) -> str | None:
+    """Distinguish blocked/login responses from readable article or viewer HTML."""
+    problem = access_problem(url, text)
+    if problem:
+        return problem
+    if isinstance(status_code, int) and status_code >= 400:
+        return f"HTTP {status_code}"
+    if expect_pdf and re.search(r"<(?:iframe|embed|object)\b", text, re.I):
+        return "PDF endpoint returned an HTML viewer instead of PDF bytes"
+    return None
+
+
+def recovery_for(problem: str) -> str:
+    if "sign-in is required" in problem:
+        return "Run papr login ucl and complete institutional sign-in"
+    if "country mismatch" in problem:
+        return "Try a repository copy or ask the library to check PDF-host proxy routing"
+    if "HTML viewer" in problem:
+        return "Follow the viewer's same-article PDF destination or try another original source"
+    if "HTTP" in problem:
+        return "Check publisher access or try a verified repository copy"
+    return "Retry with --show-browser and complete browser verification"
+
+
+def navigation_failure(exc: Exception) -> dict:
+    """Retain recognized browser error codes without exposing raw signed URLs."""
+    match = re.search(r"\bnet::ERR_[A-Z_]+\b", str(exc))
+    code = match.group(0) if match else None
+    return {
+        "reason": f"Browser navigation failed ({code})" if code
+        else "Browser could not open landing page",
+        "recovery": (
+            "Check the publisher URL and network/proxy routing; try another original source"
+        ),
+        **({"error_code": code} if code else {}),
+    }

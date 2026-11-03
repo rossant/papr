@@ -11,7 +11,7 @@ from papr.config import Config
 from papr.fetchers import oa, ucl
 from papr.fetchers.candidates import article_identity, rank_candidate_urls
 from papr.fetchers.diagnostics import access_problem
-from papr.fetchers.publishers import publisher_pdf_urls
+from papr.fetchers.publishers import canonical_publisher_url, publisher_pdf_urls
 from papr.model import Article
 
 
@@ -37,6 +37,72 @@ def test_springer_original_route_keeps_exact_doi_and_host(host, route):
     assert publisher_pdf_urls(landing) == [pdf]
     assert article_identity(landing) == article_identity(pdf)
     assert rank_candidate_urls(landing, publisher_pdf_urls(landing)) == [pdf]
+
+
+@pytest.mark.parametrize("route", ["", "article/"])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_legacy_springer_landing_is_canonicalized_before_proxying(route, scheme):
+    old = f"{scheme}://link.springer.com/{route}10.1007/BF00707189?tracking=old"
+    canonical = "https://link.springer.com/article/10.1007/BF00707189"
+    assert canonical_publisher_url(old) == canonical
+    assert ucl._proxy_url(Article("Paper", url=old)) == f"{ucl.UCL_LOGIN}?url={canonical}"
+
+
+def test_canonicalization_preserves_article_scope_and_rejects_unknown_hosts():
+    for url in (
+        "http://link.springer.com.evil.test/10.1007/paper",
+        "http://user:password@link.springer.com/10.1007/paper",
+        "http://link.springer.com/chapter/10.1007/book",
+        "http://link.springer.com/10.1007/paper/supplement.pdf",
+        "http://www.ovid.com/10.1007/paper",
+    ):
+        assert canonical_publisher_url(url) == url
+    old = "http://link.springer.com.libproxy.ucl.ac.uk/10.1007/paper"
+    assert canonical_publisher_url(old) == (
+        "https://link-springer-com.libproxy.ucl.ac.uk/article/10.1007/paper"
+    )
+
+
+@pytest.mark.parametrize("host", [
+    "onlinelibrary.wiley.com", "onlinelibrary-wiley-com.libproxy.ucl.ac.uk",
+])
+@pytest.mark.parametrize("view", ["", "abs/", "full/", "pdf/", "epdf/", "pdfdirect/"])
+def test_wiley_viewer_routes_target_only_the_same_doi(host, view):
+    landing = f"https://{host}/doi/{view}10.1111/dmcn.15676"
+    direct = f"https://{host}/doi/pdfdirect/10.1111/dmcn.15676"
+    assert publisher_pdf_urls(landing) == [direct]
+    assert article_identity(landing) == article_identity(direct)
+    other = f"https://{host}/doi/pdfdirect/10.1111/other"
+    assert rank_candidate_urls(landing, [other, direct], other) == [direct]
+
+
+def test_wiley_wrapper_downloads_the_original_pdf_without_related_candidates(tmp_path, monkeypatch):
+    landing = "https://onlinelibrary-wiley-com.libproxy.ucl.ac.uk/doi/pdf/10.1111/dmcn.15676"
+    direct = landing.replace("/doi/pdf/", "/doi/pdfdirect/")
+    original = pdf_bytes(text="doi: 10.1111/dmcn.15676")
+    requested = []
+
+    def respond(request):
+        requested.append(str(request.url))
+        if str(request.url) == direct:
+            return httpx.Response(200, content=original)
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=(
+            f'<iframe src="{direct}"></iframe>'
+            '<a href="/doi/pdfdirect/10.1111/other">Related PDF</a>'
+        ))
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    article = Article("Paper", doi="10.1111/dmcn.15676", oa_pdf_url=landing)
+    path = tmp_path / "original.pdf"
+    assert oa.fetch(article, path, Config()) == direct
+    assert path.read_bytes() == original
+    assert requested == [landing, direct]
+
+    page = Mock(url=landing)
+    monkeypatch.setattr(
+        ucl, "_collect_candidate_urls", lambda page: {"links": [], "citation": None}
+    )
+    assert ucl._candidate_urls(page) == [direct]
 
 
 @pytest.mark.parametrize("url", [

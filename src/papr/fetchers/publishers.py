@@ -6,6 +6,29 @@ import re
 from urllib.parse import urlsplit, urlunsplit
 
 
+def canonical_publisher_url(url: str) -> str:
+    """Use the current Springer article route before institutional proxying.
+
+    Legacy HTTP URLs can make EZproxy construct a dotted hostname that Chrome
+    blocks. Only recognized article views on known Springer hosts are rewritten.
+    """
+    parsed = urlsplit(url)
+    hosts = {
+        "link.springer.com": "link.springer.com",
+        "link-springer-com.libproxy.ucl.ac.uk": "link-springer-com.libproxy.ucl.ac.uk",
+        "link.springer.com.libproxy.ucl.ac.uk": "link-springer-com.libproxy.ucl.ac.uk",
+    }
+    if (
+        parsed.scheme not in {"http", "https"} or parsed.hostname not in hosts
+        or parsed.username is not None or parsed.password is not None
+    ):
+        return url
+    match = re.fullmatch(r"/(?:article/)?(10\.\d{4,9}/[^/]+)/?", parsed.path)
+    if not match:
+        return url
+    return urlunsplit(("https", hosts[parsed.hostname], f"/article/{match[1]}", "", ""))
+
+
 def publisher_pdf_urls(page_url: str) -> list[str]:
     """Return original-PDF routes without leaving the current publisher/proxy.
 
@@ -34,6 +57,12 @@ def publisher_pdf_urls(page_url: str) -> list[str]:
         )
         if match:
             path = f"/content/pdf/{match[1]}.pdf"
+    elif host in {"onlinelibrary.wiley.com", "onlinelibrary-wiley-com.libproxy.ucl.ac.uk"}:
+        match = re.fullmatch(
+            r"/doi/(?:(?:abs|full|pdf|epdf|pdfdirect)/)?(10\.\d{4,9}/[^/]+)/?", parsed.path,
+        )
+        if match:
+            path = f"/doi/pdfdirect/{match[1]}"
     if path is None:
         return []
     return [urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))]

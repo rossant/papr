@@ -18,7 +18,7 @@ from ..pdf import PdfValidationError, is_pdf, validate_pdf
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
-from .diagnostics import access_problem
+from .diagnostics import access_problem, recovery_for, response_problem
 from .publishers import publisher_pdf_urls
 from .repositories import repository_urls
 
@@ -56,7 +56,15 @@ def _read_response(
     emit("fetch", detail)
     with c.stream("GET", url, timeout=remaining_time()) as response:
         if response.status_code >= 400:
-            return response, b""
+            # Error bodies identify access challenges, but do not deserve the
+            # normal document budget or permission to touch a PDF destination.
+            chunks = bytearray()
+            for chunk in response.iter_bytes():
+                remaining_time()
+                chunks.extend(chunk[:64 * 1024 - len(chunks)])
+                if len(chunks) >= 64 * 1024:
+                    break
+            return response, bytes(chunks)
         total = None
         # iter_bytes yields decoded bytes; compressed Content-Length describes the wire data.
         if response.headers.get("content-encoding", "identity").lower() == "identity":
@@ -104,7 +112,7 @@ def _download(
         r, content = _read_response(c, url, destination)
         if r.status_code >= 400:
             emit("fetch", f"PDF source returned HTTP {r.status_code}: {urlsplit(url).hostname}")
-            _failed_response(r, b"")
+            _failed_response(r, content)
             return None
         ctype = r.headers.get("content-type", "")
         if is_pdf(content, ctype):
@@ -112,7 +120,8 @@ def _download(
         text = content.decode(r.encoding or "utf-8", errors="replace")
         problem = access_problem(str(r.url), text)
         if problem:
-            record_attempt("oa", str(r.url), reason=problem, recovery=_recovery(problem))
+            record_attempt("oa", str(r.url), reason=problem, recovery=_recovery(problem),
+                           status_code=r.status_code, content_type=ctype)
             emit("fetch", problem)
             logger.debug("%s: %s", urlsplit(url).hostname, problem)
             return None
@@ -129,6 +138,7 @@ def _download(
             "oa", str(r.url), outcome="discovered" if candidates else "failed",
             reason="Publisher PDF links found" if candidates else "No matching PDF links found",
             recovery=None if candidates else "Try another repository or import an original PDF",
+            status_code=r.status_code, content_type=ctype,
         )
         for pdf_url in candidates[:8]:
             try:
@@ -153,16 +163,17 @@ def _download(
 
 
 def _recovery(problem: str) -> str:
-    if "country mismatch" in problem:
-        return "Try a repository copy or ask the library to check PDF-host proxy routing"
-    return "Retry with --show-browser and complete browser verification"
+    return recovery_for(problem)
 
 
 def _failed_response(response: httpx.Response, content: bytes) -> None:
-    problem = access_problem(str(response.url), content.decode("utf-8", errors="replace"))
     status = response.status_code
+    problem = response_problem(
+        str(response.url), content.decode("utf-8", errors="replace"), status, expect_pdf=True
+    )
     record_attempt(
         "oa", str(response.url), status_code=status,
+        content_type=response.headers.get("content-type", ""),
         reason=problem or (f"HTTP {status}" if status >= 400 else "Response is not a PDF"),
         recovery=_recovery(problem) if problem else (
             "Retry with --show-browser or try a repository copy" if status in {401, 403}

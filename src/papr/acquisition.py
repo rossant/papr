@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from urllib.parse import urlsplit, urlunsplit
@@ -43,6 +44,8 @@ def record_attempt(
     reason: str | None = None,
     recovery: str | None = None,
     status_code: int | None = None,
+    content_type: str | None = None,
+    error_code: str | None = None,
 ) -> None:
     """Store safe structured fields; callers must not include raw exception URLs."""
     attempts = _current.get()
@@ -57,4 +60,8 @@ def record_attempt(
         attempt["recovery"] = recovery
     if status_code is not None:
         attempt["status_code"] = status_code
+    if isinstance(content_type, str) and content_type.strip():
+        attempt["content_type"] = content_type.split(";", 1)[0].strip().lower()
+    if isinstance(error_code, str) and re.fullmatch(r"net::ERR_[A-Z_]+", error_code):
+        attempt["error_code"] = error_code
     attempts.append(attempt)
