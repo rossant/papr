@@ -689,6 +689,23 @@ the destination without renaming or replacing PDFs.
 
 ## Development
 
+The main implementation boundaries are:
+
+| Modules | Responsibility |
+| --- | --- |
+| `cli.py`, `cli_arguments.py` | Command routing, interactive selection, and argument definitions |
+| `get_cli.py`, `get_pipeline.py` | Batch lifetime and reporting; per-paper resolution, fetch, and export stages |
+| `fetchers/candidates.py`, `fetchers/oa.py` | Shared article-aware PDF link ranking and HTTP acquisition |
+| `fetchers/browser.py`, `fetchers/browser_pdf.py`, `fetchers/ucl.py` | Chrome lifetime, PDF transfer, and institutional access orchestration |
+| `resolvers/zotero*.py` | Read-only reference matching, HTTP discovery, SQLite snapshots, and metadata conversion |
+| `zotero.py`, `zotero_api.py`, `zotero_attachments.py` | Import reconciliation, authorized desktop transport, and attachments |
+| `pdf.py`, `pdf_source.py` | Shared signature checks and verified archive-page imports |
+
+Keep transport and storage details below command orchestration. `GetServices`
+passes CLI callbacks explicitly into the export pipeline so sequential and
+prefetched processing use the same dependencies. Browser transfer code does not
+depend on an individual metadata provider or on institutional URL routing.
+
 ```bash
 git clone https://github.com/rossant/papr.git
 cd papr
