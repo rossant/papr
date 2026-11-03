@@ -140,7 +140,9 @@ def _config_init(config: Config) -> int:
             "max_candidates = 5\n\n"
             "[pdf]\n"
             "compress = true\n"
-            "dpi = 200\n"
+            'profile = "balanced"  # balanced, compact, lossless\n'
+            "# quality = 80  # optional override (1–95)\n"
+            "# dpi = 180  # optional override; leave unset to use the profile default\n"
             "timeout = 120\n\n"
             "[zotero]\n"
             "# group_id = 1234567  # optional shared group library\n"

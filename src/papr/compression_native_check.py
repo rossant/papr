@@ -36,6 +36,8 @@ def _same(left, right):
 def _inspect(source: str, candidate: str) -> None:
     import pymupdf
 
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    pymupdf.TOOLS.mupdf_display_warnings(False)
     with pymupdf.open(source) as before, pymupdf.open(candidate) as after:
         if len(before) != len(after):
             raise ValueError("Page count changed")

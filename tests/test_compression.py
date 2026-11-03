@@ -35,6 +35,12 @@ def make_pdf(path, *, pages=1, padding=0, annotation=False, signature=False):
     return path
 
 
+@pytest.fixture(autouse=True)
+def legacy_backends(monkeypatch):
+    monkeypatch.setattr(compression, "backend_info", lambda: None)
+    monkeypatch.setattr(compression, "tool_version", lambda path: "test-version")
+
+
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "cache_dir", property(lambda self: tmp_path / "cache"))
@@ -43,6 +49,7 @@ def config(tmp_path, monkeypatch):
 
 @pytest.fixture
 def mocked_gs(monkeypatch):
+    actual_run = subprocess.run
     monkeypatch.setattr(
         compression.shutil, "which", lambda name: "/mock/gs" if name == "gs" else None,
     )
@@ -56,6 +63,8 @@ def mocked_gs(monkeypatch):
         calls = []
 
         def run(command, **kwargs):
+            if command[-1] == "papr.compression_native_check":
+                return actual_run(command, **kwargs)
             calls.append((command, kwargs))
             path = next(
                 item.split("=", 1)[1] for item in command if item.startswith("-sOutputFile=")
@@ -82,7 +91,7 @@ def test_smaller_valid_copy_is_cached_and_original_untouched(tmp_path, config, m
     assert report["saved_bytes"] == len(original) - smaller.stat().st_size
     assert report["backend"] == "ghostscript"
     assert calls[0][1]["timeout"] == 120
-    assert "-dColorImageResolution=200" in calls[0][0]
+    assert "-dColorImageResolution=180" in calls[0][0]
     assert "-dMonoImageResolution=600" in calls[0][0]
     cached, second = compression.compress_pdf(source, config)
     assert cached == output and second["status"] == "cached"
@@ -170,13 +179,12 @@ def test_invalid_input_and_disabled_are_left_alone(tmp_path, config):
     assert source.read_bytes() == b"invalid"
 
 
-def test_real_ghostscript_shrinks_pdf(tmp_path, config):
-    if shutil.which("gs") is None:
-        pytest.skip("Ghostscript is not installed")
+def test_real_compression_shrinks_pdf_and_preserves_content(tmp_path, config):
     source = make_pdf(tmp_path / "source.pdf", padding=20000)
     original = source.read_bytes()
     output, report = compression.compress_pdf(source, config)
-    assert report["backend"] == "ghostscript"
+    assert report["backend"] in {"ghostscript", "qpdf", "pypdf"}
+    assert report["validation"]["graphics_preserved"] is True
     assert output.stat().st_size < source.stat().st_size
     assert len(PdfReader(output).pages) == len(PdfReader(source).pages)
     assert source.read_bytes() == original

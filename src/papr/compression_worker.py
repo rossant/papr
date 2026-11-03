@@ -212,6 +212,8 @@ def main() -> int:
         import pymupdf
         from PIL import Image
 
+        pymupdf.TOOLS.mupdf_display_errors(False)
+        pymupdf.TOOLS.mupdf_display_warnings(False)
         request = json.load(sys.stdin)
         info = _info(pymupdf, PIL)
         if request["operation"] == "info":

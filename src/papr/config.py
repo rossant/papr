@@ -13,6 +13,7 @@ from platformdirs import user_cache_dir, user_config_dir, user_data_dir
 DEFAULT_TEMPLATE = '{{ firstCreator suffix="_" }}{{ year suffix="_" }}{{ title truncate="100" }}'
 VALID_FORMATS = {"pdf", "md", "txt", "bib", "bibtex", "csl", "json"}
 VALID_MD_BACKENDS = {"auto", "mistral", "native"}
+VALID_COMPRESSION_PROFILES = {"balanced", "compact", "lossless"}
 
 
 def _path(value: object, key: str) -> Path | None:
@@ -47,7 +48,9 @@ class Config:
     zotero_collection: str | None = None
     zotero_group_id: int | None = None
     pdf_compress: bool = True
-    pdf_compression_dpi: int = 200
+    pdf_compression_profile: str = "balanced"
+    pdf_compression_quality: int | None = None
+    pdf_compression_dpi: int | None = None
     pdf_compression_timeout: int = 120
 
     def __post_init__(self) -> None:
@@ -71,7 +74,6 @@ class Config:
             "jobs",
             "max_candidates",
             "filename_max_length",
-            "pdf_compression_dpi",
             "pdf_compression_timeout",
         ):
             value = getattr(self, name)
@@ -80,10 +82,26 @@ class Config:
                     "jobs": "jobs",
                     "max_candidates": "matching.max_candidates",
                     "filename_max_length": "filename.max_length",
-                    "pdf_compression_dpi": "pdf.dpi",
                     "pdf_compression_timeout": "pdf.timeout",
                 }[name]
                 raise ValueError(f"{key} must be a positive integer")
+        if (
+            not isinstance(self.pdf_compression_profile, str)
+            or self.pdf_compression_profile not in VALID_COMPRESSION_PROFILES
+        ):
+            raise ValueError("pdf.profile must be one of: balanced, compact, lossless")
+        if self.pdf_compression_dpi is not None and (
+            isinstance(self.pdf_compression_dpi, bool)
+            or not isinstance(self.pdf_compression_dpi, int)
+            or self.pdf_compression_dpi <= 0
+        ):
+            raise ValueError("pdf.dpi must be a positive integer")
+        if self.pdf_compression_quality is not None and (
+            isinstance(self.pdf_compression_quality, bool)
+            or not isinstance(self.pdf_compression_quality, int)
+            or not 1 <= self.pdf_compression_quality <= 95
+        ):
+            raise ValueError("pdf.quality must be an integer between 1 and 95")
         string_fields = ("filename_template", "filename_space", "mistral_model", "zotero_api_url")
         for name in string_fields:
             if not isinstance(getattr(self, name), str):
@@ -187,6 +205,8 @@ class Config:
             cfg.zotero_collection = zotero.get("collection", cfg.zotero_collection)
             cfg.zotero_group_id = zotero.get("group_id", cfg.zotero_group_id)
             cfg.pdf_compress = pdf.get("compress", cfg.pdf_compress)
+            cfg.pdf_compression_profile = pdf.get("profile", cfg.pdf_compression_profile)
+            cfg.pdf_compression_quality = pdf.get("quality", cfg.pdf_compression_quality)
             cfg.pdf_compression_dpi = pdf.get("dpi", cfg.pdf_compression_dpi)
             cfg.pdf_compression_timeout = pdf.get("timeout", cfg.pdf_compression_timeout)
             cfg.zotero_api_url = local.get("zotero_api_url", cfg.zotero_api_url)
@@ -224,15 +244,22 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
         "zotero.group_id": ("zotero_group_id", int),
         "pdf.compress": ("pdf_compress", bool),
         "pdf.dpi": ("pdf_compression_dpi", int),
+        "pdf.profile": ("pdf_compression_profile", str),
+        "pdf.quality": ("pdf_compression_quality", int),
         "pdf.timeout": ("pdf_compression_timeout", int),
     }
     if key not in fields:
         raise ValueError(f"Unsupported setting {key!r}; choose {', '.join(fields)}")
     attribute, kind = fields[key]
+    unset = key == "zotero.collection" and raw_value == "" or (
+        key in {"pdf.dpi", "pdf.quality"} and raw_value == ""
+    )
     if kind is bool:
         if raw_value.lower() not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")
         value = raw_value.lower() == "true"
+    elif kind is int and unset:
+        value = None
     elif kind is int:
         try:
             value = int(raw_value)
@@ -240,7 +267,6 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
             raise ValueError(f"{key} must be a positive integer") from None
     else:
         value = raw_value
-    unset = key == "zotero.collection" and raw_value == ""
     if unset:
         value = None
     from dataclasses import replace
@@ -275,7 +301,9 @@ def set_setting(config: Config, key: str, raw_value: str) -> Path:
             block = block.rstrip() + "\n" + assignment + "\n"
         text = text[: target.end()] + block + text[end:]
     parsed = tomllib.loads(text)
-    if parsed.get(table, {}).get(field) != value:
+    if (field in parsed.get(table, {})) != (not unset) or (
+        not unset and parsed.get(table, {}).get(field) != value
+    ):
         raise ValueError(f"Could not update {key}; edit {path} manually")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None

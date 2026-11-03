@@ -23,6 +23,8 @@ def _compress_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dpi", type=int, help="color/gray image resolution (default: personal setting)"
     )
+    parser.add_argument("--profile", choices=("balanced", "compact", "lossless"))
+    parser.add_argument("--quality", type=int, help="JPEG quality, from 1 to 95")
     parser.add_argument(
         "--overwrite", action="store_true", help="replace existing compressed copies"
     )
@@ -38,8 +40,15 @@ def _run_compress(args: argparse.Namespace, config: Config) -> int:
         print("✗ --in-place cannot be combined with --output", file=sys.stderr)
         return 1
     try:
-        if args.dpi is not None:
-            config = replace(config, pdf_compression_dpi=args.dpi)
+        overrides = {}
+        if getattr(args, "dpi", None) is not None:
+            overrides["pdf_compression_dpi"] = args.dpi
+        if getattr(args, "profile", None) is not None:
+            overrides["pdf_compression_profile"] = args.profile
+        if getattr(args, "quality", None) is not None:
+            overrides["pdf_compression_quality"] = args.quality
+        if overrides:
+            config = replace(config, **overrides)
     except ValueError as exc:
         print(f"✗ Compression: {exc}", file=sys.stderr)
         return 1
