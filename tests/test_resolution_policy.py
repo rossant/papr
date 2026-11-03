@@ -256,6 +256,7 @@ def test_remote_providers_overlap_with_stable_merge_order(monkeypatch, query, me
 
     monkeypatch.setattr(resolvers.crossref, method, crossref)
     monkeypatch.setattr(resolvers.openalex, method, openalex)
+    monkeypatch.setattr(resolvers.pubmed, "search", lambda *args: [])
     result = resolvers.resolve(query, Config(), use_local=False)
     assert len(set(threads)) == 2
     assert len(result) == 1

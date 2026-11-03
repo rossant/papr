@@ -108,7 +108,15 @@ def _remote_providers(
 
 def _remote_search(query: str, config: Config) -> list[Article]:
     groups = _remote_providers((crossref.search, openalex.search), query, config, "Searching")
-    return [article for group in groups for article in group]
+    articles = [article for group in groups for article in group]
+    ranked = sorted(deduplicate(articles), key=lambda a: a.score or 0.0, reverse=True)
+    if not _strong_local(ranked, config):
+        emit("resolve", "Searching PubMed for additional candidates")
+        try:
+            articles.extend(pubmed.search(query, config))
+        except Exception:
+            logger.debug("PubMed search failed", exc_info=True)
+    return articles
 
 
 def _expanded_query(article: Article) -> str:
