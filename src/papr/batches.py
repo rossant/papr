@@ -267,7 +267,7 @@ def export_batch(
                         and destination.is_file()
                         and checksum(destination) == artifact["sha256"]
                     )
-                    occupied = destination.exists() and not overwrite
+                    occupied = (destination.exists() or destination.is_symlink()) and not overwrite
                     if identical or (reserved_digest is None and not occupied):
                         break
                     destination = base.with_name(f"{base.stem}_{counter}{base.suffix}")

@@ -60,6 +60,28 @@ def test_offline_reexport_after_original_files_moved(tmp_path, config, monkeypat
     assert cli.main(["batch", "check", str(manifest)]) == 0
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_reexport_preserves_dangling_symlink_collisions(tmp_path, config, dry_run):
+    manifest, pdf, _ = batch(tmp_path, config)
+    output = tmp_path / "export"
+    output.mkdir()
+    missing = tmp_path / "missing"
+    (output / "paper.pdf").symlink_to(missing)
+    (output / "paper_2.pdf").symlink_to(missing)
+
+    rows = export_batch(manifest, output, config, dry_run=dry_run)
+
+    assert rows[0]["status"] == ("dry-run" if dry_run else "ok")
+    assert str(output / "paper_3.pdf") in rows[0]["outputs"]
+    assert (output / "paper.pdf").is_symlink()
+    assert (output / "paper_2.pdf").is_symlink()
+    assert not missing.exists()
+    if dry_run:
+        assert not (output / "paper_3.pdf").exists()
+    else:
+        assert (output / "paper_3.pdf").read_bytes() == pdf.read_bytes()
+
+
 @pytest.mark.parametrize("failure", ["modified", "missing", "corrupt-cache"])
 def test_entire_batch_preflight_prevents_partial_export(tmp_path, config, failure):
     manifest, pdf, metadata = batch(tmp_path, config)
