@@ -86,6 +86,14 @@ papr REF --zotero
 papr REF --zotero --collection Inbox
 ```
 
+If PDF retrieval fails, `--zotero` still creates or reuses the bibliography entry
+without an attachment. Requested BibTeX/CSL/JSON outputs are saved too. The missing
+PDF remains a failure with a non-zero exit code; reports record
+`pdf_status: "unavailable"` and a separate `zotero` result with
+`metadata_only: true`. A Zotero error is recorded separately and does not replace the PDF failure. Retry the same
+reference with `--zotero` when a PDF becomes available to attach it to the existing
+entry. Unresolved or ambiguous references are never saved through this fallback.
+
 Zotero groups and collections are different: the SBS group library is library
 ID `5593385`, while `Inbox` is an optional collection inside a selected
 library. Set the group library as your personal default with
@@ -591,6 +599,12 @@ results and errors. `--verbose` adds resolver and download diagnostics.
 Each item in the JSON file written by `--report` includes `duration` in seconds,
 per-stage `timings` in seconds, and `failed_stage` on errors. The terminal summary
 shows successes, failures, cache hits, elapsed time, and the output directory.
+The `acquisition_attempts` list records each HTTP/browser source attempted,
+discovery results, cache use, and validation failures, including on failed items.
+Entries include `source`, `outcome`, and, when available, `url`, `status_code`,
+`reason`, and `recovery`. URLs in this list omit credentials, query parameters,
+and fragments. The same attempts are retained in the batch manifest; duplicate
+references share acquisition diagnostics, and concurrent papers keep separate logs.
 During concurrent fetching, `duration` runs from preparation through publication,
 including time in the bounded queue; resolve/fetch timings record the actual
 work, including shared acquisition for duplicates. Papers overlap, so adding
@@ -665,6 +679,21 @@ archive URL are recorded under papr's data directory in `pdf-sources/`.
 The source PDF is preserved. Archive/thesis discovery is not automatic; this
 command makes an explicitly verified recovery reusable by ordinary DOI requests.
 
+After known sources and Unpaywall locations fail, papr queries OpenAlex for
+repository PDFs and landing pages linked to the exact requested DOI. This
+discovery accepts only locations marked `publishedVersion`, so a submitted or
+accepted manuscript is not selected by this fallback. It also works when a local
+bibliography record contains no remote PDF links. Thesis discovery and selection
+of article pages within a thesis remain manual.
+
+Downloaded candidates are checked before entering the PDF cache: they must have
+an end-of-file marker, parse successfully, and contain readable pages and content
+streams. A damaged candidate is skipped so another source can be tried. Cached
+downloads receive the same checks before reuse. When text or PDF metadata provides
+clear evidence of a different DOI or article title, the candidate is rejected.
+Scans and documents lacking extractable identifiers remain eligible; these checks
+cannot establish bibliographic identity when the evidence is absent.
+
 The opt-in native Chrome attachment regression uses a local HTTP server and a
 disposable browser profile (a desktop display and Chrome/Chromium are required):
 
@@ -699,7 +728,8 @@ The main implementation boundaries are:
 | `fetchers/browser.py`, `fetchers/browser_pdf.py`, `fetchers/ucl.py` | Chrome lifetime, PDF transfer, and institutional access orchestration |
 | `resolvers/zotero*.py` | Read-only reference matching, HTTP discovery, SQLite snapshots, and metadata conversion |
 | `zotero.py`, `zotero_api.py`, `zotero_attachments.py` | Import reconciliation, authorized desktop transport, and attachments |
-| `pdf.py`, `pdf_source.py` | Shared signature checks and verified archive-page imports |
+| `pdf.py`, `pdf_source.py` | Signature and structural/identity validation; verified archive-page imports |
+| `acquisition.py`, `fetchers/repositories.py` | Scoped attempt diagnostics and exact-DOI repository discovery |
 
 Keep transport and storage details below command orchestration. `GetServices`
 passes CLI callbacks explicitly into the export pipeline so sequential and
