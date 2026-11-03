@@ -14,6 +14,7 @@ from ..config import Config
 from ..http import client, http_deadline, remaining_time
 from ..model import Article
 from ..progress import emit
+from ..resolvers.common import normalize_pmcid
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +127,8 @@ def candidate_urls(article: Article, config: Config) -> Iterator[str]:
     direct = []
     if article.oa_pdf_url:
         direct.append(article.oa_pdf_url)
-    if article.pmcid:
-        pmcid = article.pmcid.upper()
-        if not pmcid.startswith("PMC"):
-            pmcid = "PMC" + pmcid
+    pmcid = normalize_pmcid(article.pmcid)
+    if pmcid:
         direct.append(f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/")
     for url in direct:
         if url not in seen:

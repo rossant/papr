@@ -73,6 +73,21 @@ def extract_doi(query: str) -> str | None:
     return normalize_doi(query)
 
 
+def normalize_pmcid(value: str | None) -> str | None:
+    """Accept bare IDs and both current and legacy NCBI article URLs."""
+    if not value:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"(?:PMC)?\d+", value, re.I):
+        return "PMC" + re.sub(r"^PMC", "", value, flags=re.I)
+    parsed = urlsplit(value)
+    if parsed.hostname in {"pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov"}:
+        match = re.fullmatch(r"/(?:pmc/)?articles/(?:PMC)?(\d+)(?:/pdf)?/?", parsed.path, re.I)
+        if match:
+            return "PMC" + match.group(1)
+    return None
+
+
 def extract_pmid(query: str) -> str | None:
     q = query.strip()
     if q.lower().startswith("pmid:"):

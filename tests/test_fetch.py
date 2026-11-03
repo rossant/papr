@@ -19,6 +19,28 @@ def test_pdf_validation():
     assert not is_pdf(b"<html>no</html>", "text/html")
 
 
+@pytest.mark.parametrize("pmcid", [
+    "4166833", "PMC4166833", "pmc4166833",
+    "https://www.ncbi.nlm.nih.gov/pmc/articles/4166833",
+    "http://www.ncbi.nlm.nih.gov/pmc/articles/PMC4166833/",
+    "https://pmc.ncbi.nlm.nih.gov/articles/PMC4166833/",
+])
+def test_pmc_identifiers_and_urls_fetch_canonical_pdf(tmp_path, monkeypatch, config, pmcid):
+    requested = []
+
+    def respond(request):
+        requested.append(str(request.url))
+        return httpx.Response(200, content=b"%PDF-1.7\narticle")
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    assert oa.fetch(Article("Paper", pmcid=pmcid), tmp_path / "paper.pdf", config)
+    assert requested == ["https://pmc.ncbi.nlm.nih.gov/articles/PMC4166833/pdf/"]
+
+
+def test_invalid_pmc_identifier_does_not_create_broken_url(config):
+    assert list(oa.candidate_urls(Article("Paper", pmcid="https://example.org/123"), config)) == []
+
+
 def test_oa_skips_mislabeled_pdf_and_broken_links(tmp_path, monkeypatch, config):
     requested = []
 

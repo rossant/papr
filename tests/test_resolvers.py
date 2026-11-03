@@ -62,6 +62,14 @@ def test_openalex_mapping():
     assert a.pages == "10-12"
 
 
+def test_openalex_normalizes_legacy_pmc_url():
+    article = openalex_item({
+        "title": "Paper",
+        "ids": {"pmcid": "https://www.ncbi.nlm.nih.gov/pmc/articles/4166833"},
+    })
+    assert article.pmcid == "PMC4166833"
+
+
 def test_deduplicate_merges_sources():
     a = Article("Title", doi="10.1/x", journal="J")
     b = Article("Title", doi="10.1/x", pmid="123")
