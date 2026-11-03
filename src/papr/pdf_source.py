@@ -27,9 +27,9 @@ def _normalized(text: str) -> str:
 def _page_dois(text: str) -> set[str]:
     """Compare complete text tokens, including punctuation a DOI matcher may omit."""
     identifiers = set()
-    for token in re.findall(r"(?<!\w)10\.\d{4,9}/[^\s<>\"']+", text, re.I):
-        token = token.rstrip(".,;")
-        for opening, closing in (("(", ")"), ("[", "]"), ("{", "}")):
+    for token in re.findall(r"(?<!\w)10\.\d{4,9}/\S+", text, re.I):
+        token = token.rstrip(".,;\"'")
+        for opening, closing in (("(", ")"), ("[", "]"), ("{", "}"), ("<", ">")):
             while token.endswith(closing) and token.count(closing) > token.count(opening):
                 token = token[:-1].rstrip(".,;")
         identifiers.add(token.casefold())

@@ -96,8 +96,13 @@ def test_cache_import_command_uses_verified_page_selection(archive, capsys):
     ("10.1234/original#wrong", False),
     ("10.1234/original@wrong", False),
     ("10.1234/original~wrong", False),
+    ("10.1234/original<wrong>", False),
+    ('10.1234/original"wrong', False),
+    ("10.1234/original'wrong", False),
     ("https://doi.org/10.1234/ORIGINAL.", True),
     ("(doi:10.1234/original).", True),
+    ('"https://doi.org/10.1234/original"', True),
+    ("<https://doi.org/10.1234/original>", True),
 ])
 def test_archive_import_compares_complete_normalized_dois(
     archive, monkeypatch, doi_on_page, accepted,
