@@ -4,6 +4,7 @@ import gzip
 
 import httpx
 import pytest
+from pdf_helpers import pdf_bytes
 from pypdf import PdfWriter
 
 from papr import fetchers
@@ -34,7 +35,7 @@ def test_pdf_cache_reports_hit_without_calling_sources(tmp_path, monkeypatch):
     article = Article(title="Cached paper")
     cache = fetchers._cache_path(article, config)
     cache.parent.mkdir(parents=True)
-    cache.write_bytes(b"%PDF-1.7\ncached")
+    cache.write_bytes(pdf_bytes("cached"))
     events = []
     monkeypatch.setattr(fetchers, "emit", lambda stage, detail: events.append((stage, detail)))
 

@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 import pytest
+from pdf_helpers import pdf_bytes
 
 from papr import cli
 from papr.config import Config
@@ -39,7 +40,7 @@ def test_prefetch_overlaps_but_preparation_and_publication_stay_in_order(config)
         worker_threads.append(threading.get_ident())
         barrier.wait(timeout=3)
         emit("fetch", f"Fetched {article.title}")
-        destination.write_bytes(b"%PDF-test")
+        destination.write_bytes(pdf_bytes('test'))
         return article.title
 
     try:
@@ -83,7 +84,7 @@ def test_refresh_duplicates_share_acquisition_and_serial_ucl_fallback(config):
         assert threading.get_ident() == main_thread
         assert kwargs == {"headless": False}
         ucl_calls.append(article)
-        destination.write_bytes(b"%PDF-browser")
+        destination.write_bytes(pdf_bytes('browser'))
         return "ucl"
 
     with Prefetch(["one", "two", "three"], prepare, fetch, config, jobs=2, refresh=True) as pool:
@@ -92,7 +93,7 @@ def test_refresh_duplicates_share_acquisition_and_serial_ucl_fallback(config):
             for item in pool
         ]
         assert len(set(paths)) == 1
-        assert paths[0].read_bytes() == b"%PDF-browser"
+        assert paths[0].read_bytes() == pdf_bytes('browser')
     assert len(oa_calls) == len(ucl_calls) == 1
     assert len(list((config.cache_dir / "pdf").glob("*.pdf"))) == 1
     assert not list((config.cache_dir / "pdf").glob("*.tmp.pdf"))
@@ -105,7 +106,7 @@ def test_failed_worker_continues_and_cleans_up(config):
         return Article(item), None, True
 
     def fetch(article, destination, config, **kwargs):
-        destination.write_bytes(b"%PDF-partial")
+        destination.write_bytes(pdf_bytes('partial'))
         if article.title == "fetch-error":
             raise OSError("Download interrupted")
         return "oa"
@@ -126,7 +127,7 @@ def test_cli_local_priority_order_collisions_and_progress_isolation(config, tmp_
     main_thread = threading.get_ident()
     barrier = threading.Barrier(2)
     local = tmp_path / "local.pdf"
-    local.write_bytes(b"%PDF-local")
+    local.write_bytes(pdf_bytes('local'))
     calls = []
     events = []
     original_event = Reporter.event
@@ -147,7 +148,7 @@ def test_cli_local_priority_order_collisions_and_progress_isolation(config, tmp_
         assert article.doi != "10.1000/local"
         barrier.wait(timeout=3)
         emit("fetch", article.doi)
-        destination.write_bytes(b"%PDF-remote")
+        destination.write_bytes(pdf_bytes('remote'))
         return "oa"
 
     monkeypatch.setattr(cli, "_resolve_item", resolve)
@@ -175,7 +176,7 @@ def test_cli_local_priority_order_collisions_and_progress_isolation(config, tmp_
     assert [row["status"] for row in rows] == ["ok"] * 3
     outputs = [Path(row["outputs"][0]) for row in rows]
     assert len(set(outputs)) == 3
-    assert outputs[1].read_bytes() == b"%PDF-local"
+    assert outputs[1].read_bytes() == pdf_bytes('local')
     assert sorted(calls) == ["10.1000/first", "10.1000/last"]
     assert all(doi in label for label, stage, doi in events if doi.startswith("10.1000/"))
     assert manifest.is_file()
@@ -191,7 +192,7 @@ def test_cli_single_job_preserves_sequential_resolution(config, tmp_path, monkey
     def fetch(article, destination, config, **kwargs):
         assert threading.current_thread() is threading.main_thread()
         seen.append(f"fetch:{article.title}")
-        destination.write_bytes(b"%PDF-test")
+        destination.write_bytes(pdf_bytes('test'))
         return "oa"
 
     monkeypatch.setattr(cli, "_resolve_item", resolve)
@@ -215,7 +216,7 @@ def test_jobs_configuration_is_validated(value):
 
 def test_local_pdf_attribute_bypasses_failed_duplicate_future(config, tmp_path):
     local = tmp_path / "attached.pdf"
-    local.write_bytes(b"%PDF-attachment")
+    local.write_bytes(pdf_bytes('attachment'))
     calls = []
 
     def prepare(item):
@@ -250,7 +251,7 @@ def test_live_progress_drains_before_worker_finishes_and_timings_measure_work(co
     def fetch(article, destination, config, **kwargs):
         emit("fetch", "Downloading", completed=64, total=128, unit="B")
         assert release.wait(timeout=3), "coordinator did not display progress"
-        destination.write_bytes(b"%PDF-test")
+        destination.write_bytes(pdf_bytes('test'))
         return "oa"
 
     class ObservingReporter(Reporter):
@@ -299,12 +300,12 @@ def test_staging_is_bounded_and_late_duplicates_reuse_cache(config, monkeypatch,
         oa_calls.append(article.doi)
         if use_ucl:
             return None
-        destination.write_bytes(b"%PDF-open-access")
+        destination.write_bytes(pdf_bytes('open-access'))
         return "oa:test"
 
     def fetch_ucl(article, destination, config):
         ucl_calls.append(article.doi)
-        destination.write_bytes(b"%PDF-institutional")
+        destination.write_bytes(pdf_bytes('institutional'))
         return "ucl:test"
 
     monkeypatch.setattr(oa, "fetch", fetch_oa)
@@ -358,11 +359,11 @@ def test_release_waits_for_worker_when_publication_fails_before_result(config):
         return Article(item), None, True
 
     def fetch(article, destination, config, **kwargs):
-        destination.write_bytes(b"%PDF-in-progress")
+        destination.write_bytes(pdf_bytes('in-progress'))
         started.set()
         threading.Event().wait(timeout=0.03)
         assert destination.exists(), "staging was removed while the worker was active"
-        destination.write_bytes(b"%PDF-finished")
+        destination.write_bytes(pdf_bytes('finished'))
         return "oa"
 
     with Prefetch(["paper"], prepare, fetch, config, jobs=2) as pool:
@@ -398,7 +399,7 @@ def test_richer_duplicate_retries_failed_oa_candidate_without_cache_race(
             if not article.oa_pdf_url:
                 threading.Event().wait(timeout=0.02)
                 return None
-            destination.write_bytes(f"%PDF-{article.oa_pdf_url}".encode())
+            destination.write_bytes(pdf_bytes(article.oa_pdf_url))
             return article.oa_pdf_url
         finally:
             with guard:
@@ -419,7 +420,7 @@ def test_richer_duplicate_retries_failed_oa_candidate_without_cache_race(
                 path, source = pool.result(prepared, allow_ucl=allow_ucl, ucl_fetch=browser)
                 expected = "other.pdf" if prepared.item == "other" else "working.pdf"
                 assert source == expected
-                assert path.read_bytes() == f"%PDF-{expected}".encode()
+                assert path.read_bytes() == pdf_bytes(expected)
             pool.release(prepared)
     assert sorted(calls, key=lambda call: str(call)) == sorted(
         [("10.1000/same", None), ("10.1000/same", "working.pdf"), ("10.1000/other", "other.pdf")],
@@ -437,7 +438,7 @@ def test_richer_duplicate_reuses_success_even_when_refreshing(config, monkeypatc
 
     def fetch_oa(article, destination, config):
         calls.append(article.oa_pdf_url)
-        destination.write_bytes(b"%PDF-first-success")
+        destination.write_bytes(pdf_bytes('first-success'))
         return "first-success"
 
     monkeypatch.setattr(oa, "fetch", fetch_oa)
@@ -447,7 +448,7 @@ def test_richer_duplicate_reuses_success_even_when_refreshing(config, monkeypatc
         for prepared in pool:
             path, source = pool.result(prepared, allow_ucl=False, ucl_fetch=None)
             assert source == "first-success"
-            assert path.read_bytes() == b"%PDF-first-success"
+            assert path.read_bytes() == pdf_bytes('first-success')
             pool.release(prepared)
     assert calls == ["first.pdf"]
 
@@ -466,7 +467,7 @@ def test_cli_later_duplicate_with_new_pdf_url_succeeds(config, monkeypatch, tmp_
         calls.append(article.oa_pdf_url)
         if not article.oa_pdf_url:
             return None
-        destination.write_bytes(b"%PDF-later-candidate")
+        destination.write_bytes(pdf_bytes('later-candidate'))
         return article.oa_pdf_url
 
     monkeypatch.setattr(cli, "_resolve_item", resolve)
@@ -489,7 +490,7 @@ def test_cli_later_duplicate_with_new_pdf_url_succeeds(config, monkeypatch, tmp_
     assert cli._run_get(args, config) == 1
     rows = json.loads(report.read_text())
     assert [row["status"] for row in rows] == ["error", "ok", "ok"]
-    assert Path(rows[1]["outputs"][0]).read_bytes() == b"%PDF-later-candidate"
+    assert Path(rows[1]["outputs"][0]).read_bytes() == pdf_bytes('later-candidate')
     assert calls == [None, "working.pdf"]
 
 
@@ -508,7 +509,7 @@ def test_different_failed_candidates_share_successful_browser_acquisition(config
 
     def browser(article, destination, config):
         browser_calls.append(article.oa_pdf_url)
-        destination.write_bytes(b"%PDF-one-browser-acquisition")
+        destination.write_bytes(pdf_bytes('one-browser-acquisition'))
         return "ucl"
 
     monkeypatch.setattr(oa, "fetch", failed_oa)
@@ -519,7 +520,7 @@ def test_different_failed_candidates_share_successful_browser_acquisition(config
         for prepared in pool:
             path, source = pool.result(prepared, allow_ucl=True, ucl_fetch=browser)
             assert source == "ucl"
-            assert path.read_bytes() == b"%PDF-one-browser-acquisition"
+            assert path.read_bytes() == pdf_bytes('one-browser-acquisition')
             pool.release(prepared)
     assert calls == ["first.pdf", "second.pdf"]
     assert browser_calls == ["first.pdf"]

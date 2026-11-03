@@ -15,6 +15,7 @@ from .artifacts import atomic_json, checksum
 from .config import Config
 from .fetchers import _cache_path
 from .locking import state_lock
+from .pdf import doi_tokens as _page_dois
 from .resolvers import resolve
 from .resolvers.common import normalize_doi
 from .selection import select_candidate
@@ -22,18 +23,6 @@ from .selection import select_candidate
 
 def _normalized(text: str) -> str:
     return re.sub(r"[^\w]", "", text.casefold())
-
-
-def _page_dois(text: str) -> set[str]:
-    """Compare complete text tokens, including punctuation a DOI matcher may omit."""
-    identifiers = set()
-    for token in re.findall(r"(?<!\w)10\.\d{4,9}/\S+", text, re.I):
-        token = token.rstrip(".,;\"'")
-        for opening, closing in (("(", ")"), ("[", "]"), ("{", "}"), ("<", ">")):
-            while token.endswith(closing) and token.count(closing) > token.count(opening):
-                token = token[:-1].rstrip(".,;")
-        identifiers.add(token.casefold())
-    return identifiers
 
 
 def _publish(prepared: Path, cache: Path, provenance: Path, record: dict) -> None:

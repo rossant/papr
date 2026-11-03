@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from pdf_helpers import pdf_bytes
 
 from papr.config import Config
 from papr.fetchers import browser_pdf, oa
@@ -38,7 +39,7 @@ def test_second_known_pdf_is_tried_before_discovery(tmp_path, monkeypatch):
         requests.append(request.url.path)
         if request.url.path == "/first.pdf":
             return httpx.Response(403)
-        return httpx.Response(200, content=b"%PDF-1.7\noriginal")
+        return httpx.Response(200, content=pdf_bytes('original'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     monkeypatch.setattr(oa, "_unpaywall_urls", lambda *a: pytest.fail("premature discovery"))
@@ -47,7 +48,7 @@ def test_second_known_pdf_is_tried_before_discovery(tmp_path, monkeypatch):
     ])
     destination = tmp_path / "paper.pdf"
     assert oa.fetch(article, destination, Config()) == "https://archive.test/second.pdf"
-    assert destination.read_bytes() == b"%PDF-1.7\noriginal"
+    assert destination.read_bytes() == pdf_bytes('original')
     assert requests == ["/first.pdf", "/second.pdf"]
 
 
@@ -66,7 +67,7 @@ def test_unpaywall_tries_repository_after_best_location_fails(tmp_path, monkeypa
             })
         if request.url.path == "/blocked.pdf":
             return httpx.Response(403)
-        return httpx.Response(200, content=b"%PDF-1.7\narchive")
+        return httpx.Response(200, content=pdf_bytes('archive'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     article = Article("Paper", doi="10.1234/paper")
@@ -99,14 +100,14 @@ def test_native_browser_fetch_saves_real_pdf_not_viewer_html(tmp_path):
     page = MagicMock()
     page.evaluate.return_value = {
         "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2640637/pdf/original.pdf",
-        "data": base64.b64encode(b"%PDF-1.7\noriginal text layer").decode(),
+        "data": base64.b64encode(pdf_bytes('original text layer')).decode(),
     }
     path = tmp_path / "original.pdf"
     assert browser_pdf.browser_fetch_pdf(page, page.evaluate.return_value["url"], path)
-    assert path.read_bytes() == b"%PDF-1.7\noriginal text layer"
+    assert path.read_bytes() == pdf_bytes('original text layer')
     page.evaluate.return_value = None
     assert browser_pdf.browser_fetch_pdf(page, "https://publisher.test/verification", path) is None
-    assert path.read_bytes() == b"%PDF-1.7\noriginal text layer"
+    assert path.read_bytes() == pdf_bytes('original text layer')
 
 
 def test_browser_verification_is_reported_instead_of_missing_pdf(tmp_path, monkeypatch):
@@ -131,10 +132,10 @@ def test_visible_browser_allows_user_verification_before_original_fetch(tmp_path
     destination = tmp_path / "paper.pdf"
 
     def original_fetch(page, url, path):
-        path.write_bytes(b"%PDF-1.7\nverified original")
+        path.write_bytes(pdf_bytes('verified original'))
         return url
 
     monkeypatch.setattr(browser_pdf, "browser_fetch_pdf", original_fetch)
     assert browser_pdf.browser_pdf(page, page.url, destination, verification_wait=60) == page.url
-    assert destination.read_bytes() == b"%PDF-1.7\nverified original"
+    assert destination.read_bytes() == pdf_bytes('verified original')
     page.wait_for_timeout.assert_any_call(1000)

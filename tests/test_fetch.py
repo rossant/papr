@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from pdf_helpers import pdf_bytes
 
 from papr.config import Config
 from papr.fetchers import PdfUnavailable, _cache_path, fetch_pdf, oa, ucl
@@ -30,7 +31,7 @@ def test_pmc_identifiers_and_urls_fetch_canonical_pdf(tmp_path, monkeypatch, con
 
     def respond(request):
         requested.append(str(request.url))
-        return httpx.Response(200, content=b"%PDF-1.7\narticle")
+        return httpx.Response(200, content=pdf_bytes('article'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     assert oa.fetch(Article("Paper", pmcid=pmcid), tmp_path / "paper.pdf", config)
@@ -58,7 +59,7 @@ def test_oa_skips_mislabeled_pdf_and_broken_links(tmp_path, monkeypatch, config)
             )
         if request.url.path == "/broken.pdf":
             raise httpx.ConnectError("offline", request=request)
-        return httpx.Response(200, content=b"%PDF-1.7\nvalid")
+        return httpx.Response(200, content=pdf_bytes('valid'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     article = Article(
@@ -66,17 +67,17 @@ def test_oa_skips_mislabeled_pdf_and_broken_links(tmp_path, monkeypatch, config)
     )
     destination = tmp_path / "paper.pdf"
     assert oa.fetch(article, destination, config) == "https://example.org/valid.pdf"
-    assert destination.read_bytes() == b"%PDF-1.7\nvalid"
+    assert destination.read_bytes() == pdf_bytes('valid')
     assert requested == ["/bad.pdf", "/landing", "/broken.pdf", "/valid.pdf"]
 
 
 def test_local_attachment_precedes_cache(tmp_path, monkeypatch, config):
     local = tmp_path / "local.pdf"
-    local.write_bytes(b"%PDF-1.7\nlocal")
+    local.write_bytes(pdf_bytes('local'))
     article = Article(title="Paper", local_pdf=str(local))
     cache = _cache_path(article, config)
     cache.parent.mkdir(parents=True)
-    cache.write_bytes(b"%PDF-1.7\ncached")
+    cache.write_bytes(pdf_bytes('cached'))
     destination = tmp_path / "output.pdf"
     assert fetch_pdf(article, destination, config) == f"local:{local}"
     assert destination.read_bytes() == local.read_bytes()
@@ -91,13 +92,13 @@ def test_invalid_cache_is_replaced(tmp_path, monkeypatch, config):
     cache.write_bytes(b"<html>error</html>")
 
     def fetch(article, destination, config):
-        destination.write_bytes(b"%PDF-1.7\nnew")
+        destination.write_bytes(pdf_bytes('new'))
         return "https://example.org/paper.pdf"
 
     monkeypatch.setattr(oa, "fetch", fetch)
     destination = tmp_path / "output.pdf"
     assert fetch_pdf(article, destination, config).startswith("https:")
-    assert cache.read_bytes() == destination.read_bytes() == b"%PDF-1.7\nnew"
+    assert cache.read_bytes() == destination.read_bytes() == pdf_bytes('new')
 
 
 def test_invalid_oa_result_falls_back_to_ucl(tmp_path, monkeypatch, config):
@@ -106,14 +107,14 @@ def test_invalid_oa_result_falls_back_to_ucl(tmp_path, monkeypatch, config):
         return "bad"
 
     def good_fetch(article, destination, config):
-        destination.write_bytes(b"%PDF-1.7\nucl")
+        destination.write_bytes(pdf_bytes('ucl'))
         return "ucl"
 
     monkeypatch.setattr(oa, "fetch", bad_fetch)
     monkeypatch.setattr(ucl, "fetch", good_fetch)
     destination = tmp_path / "output.pdf"
     assert fetch_pdf(Article(title="Paper"), destination, config) == "ucl"
-    assert destination.read_bytes() == b"%PDF-1.7\nucl"
+    assert destination.read_bytes() == pdf_bytes('ucl')
 
 
 def test_temp_files_are_unique_and_removed_on_error(tmp_path, monkeypatch, config):
@@ -137,11 +138,11 @@ def test_failed_refresh_preserves_old_cache(tmp_path, monkeypatch, config):
     article = Article(title="Paper")
     cache = _cache_path(article, config)
     cache.parent.mkdir(parents=True)
-    cache.write_bytes(b"%PDF-1.7\nold")
+    cache.write_bytes(pdf_bytes('old'))
     monkeypatch.setattr(oa, "fetch", lambda *args: None)
     with pytest.raises(PdfUnavailable):
         fetch_pdf(article, tmp_path / "output.pdf", config, refresh=True, allow_ucl=False)
-    assert cache.read_bytes() == b"%PDF-1.7\nold"
+    assert cache.read_bytes() == pdf_bytes('old')
     assert list(cache.parent.glob("*.tmp.pdf")) == []
 
 
@@ -151,7 +152,7 @@ def test_show_browser_requests_visible_institutional_browser(tmp_path, monkeypat
 
     def institutional_fetch(article, destination, config, *, headless=True):
         seen.append(headless)
-        destination.write_bytes(b"%PDF-1.7\narticle")
+        destination.write_bytes(pdf_bytes('article'))
         return "ucl"
 
     monkeypatch.setattr(ucl, "fetch", institutional_fetch)
@@ -166,7 +167,7 @@ def test_direct_sources_do_not_look_up_unpaywall(tmp_path, monkeypatch, config, 
 
     monkeypatch.setattr(oa, "_unpaywall_urls", unexpected)
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, content=b"%PDF-1.7\ndirect")
+        lambda request: httpx.Response(200, content=pdf_bytes('direct'))
     )))
     article = Article(title="Paper", doi="10.1234/paper")
     if source == "oa":
@@ -175,7 +176,7 @@ def test_direct_sources_do_not_look_up_unpaywall(tmp_path, monkeypatch, config, 
         article.pmcid = "123"
     destination = tmp_path / "paper.pdf"
     assert oa.fetch(article, destination, config)
-    assert destination.read_bytes() == b"%PDF-1.7\ndirect"
+    assert destination.read_bytes() == pdf_bytes('direct')
 
 
 def test_unpaywall_runs_after_direct_failure(tmp_path, monkeypatch, config):
@@ -188,7 +189,7 @@ def test_unpaywall_runs_after_direct_failure(tmp_path, monkeypatch, config):
     def respond(request):
         calls.append(request.url.path)
         return httpx.Response(404) if request.url.path == "/direct.pdf" else httpx.Response(
-            200, content=b"%PDF-1.7\ndiscovered"
+            200, content=pdf_bytes('discovered')
         )
 
     monkeypatch.setattr(oa, "_unpaywall_urls", unpaywall)
@@ -266,14 +267,14 @@ def test_oa_skips_related_paper_before_original_pdf(
             return httpx.Response(200, text=(
                 f'<a href="{related}">Related paper PDF</a><a href="{full}">Article PDF</a>'
             ), headers={"content-type": "text/html"})
-        return httpx.Response(200, content=b"%PDF-original")
+        return httpx.Response(200, content=pdf_bytes('original'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     destination = tmp_path / "paper.pdf"
     article = Article("Paper", url=f"https://publisher.test{landing}")
     assert oa.fetch(article, destination, config) == f"https://publisher.test{full}"
     assert requested == [landing, full]
-    assert destination.read_bytes() == b"%PDF-original"
+    assert destination.read_bytes() == pdf_bytes('original')
 
 
 @pytest.mark.parametrize("meta", [
@@ -290,7 +291,7 @@ def test_oa_uses_citation_cdn_before_other_pdf_links(tmp_path, monkeypatch, conf
                 200, text=f'<a href="unidentified.pdf">Other PDF</a>{meta}',
                 headers={"content-type": "text/html"},
             )
-        return httpx.Response(200, content=b"%PDF-original")
+        return httpx.Response(200, content=pdf_bytes('original'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     destination = tmp_path / "paper.pdf"
@@ -311,7 +312,7 @@ def test_oa_rejects_supplement_before_original_pdf(tmp_path, monkeypatch, config
                 '<a href="/articles/requested/paper_MOESM1_ESM.pdf">Supplement</a>'
                 '<a href="/articles/requested/pdf/">Article PDF</a>'
             ), headers={"content-type": "text/html"})
-        return httpx.Response(200, content=b"%PDF-original")
+        return httpx.Response(200, content=pdf_bytes('original'))
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     assert oa.fetch(
@@ -319,3 +320,60 @@ def test_oa_rejects_supplement_before_original_pdf(tmp_path, monkeypatch, config
         tmp_path / "paper.pdf", config,
     ) == "https://publisher.test/articles/requested/pdf/"
     assert requested == ["/articles/requested", "/articles/requested/pdf/"]
+
+
+def test_corrupt_pdf_signature_in_cache_is_replaced(tmp_path, monkeypatch, config):
+    article = Article("Paper")
+    cache = _cache_path(article, config)
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"%PDF-1.7\ntruncated")
+    content = pdf_bytes("recovered")
+
+    def download(article, destination, config):
+        destination.write_bytes(content)
+        return "https://publisher.test/original.pdf"
+
+    monkeypatch.setattr(oa, "fetch", download)
+    destination = tmp_path / "out.pdf"
+    assert fetch_pdf(article, destination, config) == "https://publisher.test/original.pdf"
+    assert cache.read_bytes() == destination.read_bytes() == content
+
+
+def test_invalid_remote_pdf_cannot_replace_existing_cache(tmp_path, monkeypatch, config):
+    article = Article("Paper")
+    cache = _cache_path(article, config)
+    cache.parent.mkdir(parents=True)
+    content = pdf_bytes("existing")
+    cache.write_bytes(content)
+
+    def corrupt(article, destination, config):
+        destination.write_bytes(b"%PDF-1.7\ntruncated")
+        return "https://publisher.test/broken.pdf"
+
+    monkeypatch.setattr(oa, "fetch", corrupt)
+    destination = tmp_path / "out.pdf"
+    with pytest.raises(PdfUnavailable):
+        fetch_pdf(article, destination, config, refresh=True, allow_ucl=False)
+    assert cache.read_bytes() == content
+    assert not destination.exists()
+    assert not list(cache.parent.glob("*.tmp.pdf"))
+
+
+def test_invalid_first_oa_pdf_does_not_hide_valid_second_source(tmp_path, monkeypatch, config):
+    requested = []
+    content = pdf_bytes("original")
+
+    def respond(request):
+        requested.append(request.url.path)
+        return httpx.Response(200, content=(
+            b"%PDF-1.7\ntruncated" if request.url.path == "/broken.pdf" else content
+        ))
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    article = Article("Paper", oa_pdf_urls=[
+        "https://publisher.test/broken.pdf", "https://repository.test/original.pdf",
+    ])
+    destination = tmp_path / "paper.pdf"
+    assert fetch_pdf(article, destination, config) == "https://repository.test/original.pdf"
+    assert requested == ["/broken.pdf", "/original.pdf"]
+    assert destination.read_bytes() == content
