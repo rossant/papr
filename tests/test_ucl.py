@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,9 +108,10 @@ def test_browser_pdf_saves_inline_response(tmp_path):
     page.wait_for_timeout.assert_not_called()
 
 
-def test_browser_pdf_saves_download_after_aborted_navigation(tmp_path):
+@pytest.mark.parametrize("message", ["net::ERR_ABORTED", "Download is starting"])
+def test_browser_pdf_saves_download_after_aborted_navigation(tmp_path, message):
     page = MagicMock()
-    page.goto.side_effect = playwright.Error("net::ERR_ABORTED")
+    page.goto.side_effect = playwright.Error(message)
     download = MagicMock()
     download.url = "https://publisher.test/article/pdf"
     destination = tmp_path / "article.pdf"
@@ -132,6 +134,8 @@ def test_browser_pdf_saves_download_after_aborted_navigation(tmp_path):
 
 def test_browser_pdf_aborted_without_download_is_not_success(tmp_path):
     page = MagicMock()
+    page.url = "https://publisher.test/article/pdf"
+    page.content.return_value = ""
     page.goto.side_effect = playwright.Error("net::ERR_ABORTED")
     with pytest.raises(playwright.Error, match="net::ERR_ABORTED"):
         ucl._browser_pdf(page, "https://publisher.test/article/pdf", tmp_path / "article.pdf")
@@ -177,6 +181,12 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
     context.request.get.return_value.body.return_value = b"Forbidden"
     monkeypatch.setattr(ucl, "_playwright", lambda: lambda: manager)
     monkeypatch.setattr(ucl, "_launch_kwargs", lambda: {})
+    @contextmanager
+    def native(*args):
+        yield context
+        context.close()
+
+    monkeypatch.setattr(ucl, "native_context", native)
     pdf_url = "https://publisher.test/articles/paper/pdf"
     monkeypatch.setattr(ucl, "_candidate_urls", lambda page: [pdf_url])
     fallback = MagicMock(return_value=pdf_url)
@@ -186,9 +196,7 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
         ucl.fetch(Article(title="Paper", url=page.url), destination, Config(), headless=False)
         == pdf_url
     )
-    browser.chromium.launch_persistent_context.assert_called_once_with(
-        user_data_dir=str(tmp_path), headless=False, accept_downloads=True
-    )
+    browser.chromium.launch_persistent_context.assert_not_called()
     context.request.get.assert_called_once_with(
         pdf_url,
         timeout=60_000,
@@ -197,7 +205,9 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
             "Referer": page.url,
         },
     )
-    fallback.assert_called_once_with(page, pdf_url, destination, referer=page.url)
+    fallback.assert_called_once_with(
+        page, pdf_url, destination, referer=page.url, verification_wait=60
+    )
     context.close.assert_called_once()
 
 

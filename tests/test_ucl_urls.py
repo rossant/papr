@@ -2,6 +2,15 @@ from papr.fetchers.ucl import _proxy_url, _rank_candidate_urls
 from papr.model import Article
 
 
+def test_ovid_pdf_link_matches_article_across_view_paths():
+    base = "https://www-ovid-com.libproxy.ucl.ac.uk/jnls/pec-online"
+    article = "00006565-200202000-00014~a-9-month-old-baby"
+    pdf = f"{base}/pdf/{article}"
+    unrelated = f"{base}/pdf/00006565-200202000-00015~another-paper"
+    for view in ("abstract", "fulltext"):
+        assert _rank_candidate_urls(f"{base}/{view}/{article}", [unrelated, pdf]) == [pdf]
+
+
 def test_publisher_landing_precedes_doi():
     article = Article(title="Paper", doi="10.1234/paper", url="https://publisher.test/paper")
     assert _proxy_url(article).endswith("url=https://publisher.test/paper")

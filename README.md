@@ -251,15 +251,19 @@ The acquisition order is:
 
 1. supplied PDF or PDF already attached locally through Zotero/Zolit
 2. cached PDF
-3. known direct PDF URL from reference metadata
+3. all known direct PDF URLs from reference metadata (Crossref and OpenAlex)
 4. PubMed Central, when a PMCID is known
-5. Unpaywall, when an email is configured
+5. all Unpaywall locations, when an email is configured
 6. publisher/DOI landing page and `citation_pdf_url`
 7. UCL authenticated access, when configured
 
 Downloaded PDFs are validated and cached under the platform cache directory.
 Use `--refresh` to ignore the cache and `--oa-only` to prohibit institutional
 fallback.
+
+PDF acquisition uses downloaded original PDF files. It does not print HTML to PDF
+or assemble page images when a download fails. Verification pages returned with
+HTTP 200 are recognized as access failures, rather than accepted as PDFs.
 
 ## PDF compression
 
@@ -336,11 +340,24 @@ Remove the saved browser profile with:
 papr logout ucl
 ```
 
-Some publisher pages require visible Chrome to render their PDF controls:
+Some publishers reject automated browser sessions even when the window is visible.
+Use normally launched Chrome, attached through its local debugging connection:
 
 ```bash
 papr DOI --show-browser
 ```
+
+This reuses papr's saved profile and closes that Chrome process after retrieval.
+It also tries a known PMC article directly before the institutional publisher
+route, and can retrieve a PDF already loaded in Chrome's inline viewer. Visible
+mode waits up to 60 seconds for you to complete a reCAPTCHA; it never solves one
+automatically. The default browser fallback remains headless.
+
+PDF errors distinguish browser automation rejection (`RR-16`), browser
+verification, and a country mismatch between an institutional proxy and a PDF
+CDN. A valid library login does not ensure that every CDN host is correctly
+proxied. For these failures, try another original PDF location or a repository
+copy; increasing retries against the same blocked endpoint will not help.
 
 ## OCR and Markdown
 
@@ -628,6 +645,32 @@ share a process lock so pruning cannot remove an artifact while an export is
 publishing its manifest. Export operations are serialized, including their
 retrieval and processing stages. A competing state writer waits up to five
 seconds, then reports that Papr is busy; retry it after the current operation.
+
+An original article may be included in an author's thesis even when the publisher
+PDF download is blocked. After finding and downloading that archive source, import
+verified journal pages without rendering them:
+
+```bash
+papr cache import 10.1016/j.pediatrneurol.2019.01.015 thesis.pdf --pages 99-103 \
+  --source-url https://hdl.handle.net/11250/3031337
+papr 10.1016/j.pediatrneurol.2019.01.015
+```
+
+`--pages` uses the PDF's physical page numbers, starting at 1. Omit it when the
+source is already a standalone article. Import requires the requested DOI and
+resolved article title on the first selected page, and checks the page count
+against the journal pagination when available. A failed check leaves any existing
+cache entry untouched. Source file hashes, the selected page range, and the public
+archive URL are recorded under papr's data directory in `pdf-sources/`.
+The source PDF is preserved. Archive/thesis discovery is not automatic; this
+command makes an explicitly verified recovery reusable by ordinary DOI requests.
+
+The opt-in native Chrome attachment regression uses a local HTTP server and a
+disposable browser profile (a desktop display and Chrome/Chromium are required):
+
+```bash
+PAPR_RUN_BROWSER_TESTS=1 uv run --extra ucl pytest tests/integration/test_native_browser.py
+```
 
 ## Local PDFs
 

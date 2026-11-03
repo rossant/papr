@@ -35,6 +35,11 @@ def from_item(item: dict[str, Any]) -> Article:
         pmcid=normalize_pmcid(ids.get("pmcid")),
         url=location.get("landing_page_url") or item.get("id"),
         oa_pdf_url=best.get("pdf_url") or location.get("pdf_url"),
+        oa_pdf_urls=list(dict.fromkeys(
+            entry["pdf_url"]
+            for entry in [best, location, *(item.get("locations") or [])]
+            if isinstance(entry, dict) and entry.get("pdf_url")
+        )),
         item_type=from_source(item.get("type")),
         source_item_type=item.get("type"),
         source="openalex",

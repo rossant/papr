@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import shutil
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from ..config import Config
 from ..model import Article
 from ..progress import emit
+from ..resolvers.common import normalize_pmcid
+from .browser import native_context
+from .diagnostics import PdfAccessError, access_problem
 from .oa import is_pdf
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
@@ -35,6 +41,24 @@ def _launch_kwargs() -> dict:
     return {"executable_path": executable} if executable else {}
 
 
+@contextmanager
+def _browser_context(playwright, config: Config, headless: bool):
+    if not headless:
+        executable = _browser_executable() or playwright.chromium.executable_path
+        emit("fetch", "Opening normal Chrome for original PDF retrieval")
+        with native_context(playwright, config.ucl_profile_dir, executable) as context:
+            yield context
+    else:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(config.ucl_profile_dir), headless=True,
+            accept_downloads=True, **_launch_kwargs(),
+        )
+        try:
+            yield context
+        finally:
+            context.close()
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright
@@ -49,12 +73,7 @@ def _playwright():
 def login(config: Config) -> None:
     config.ucl_profile_dir.mkdir(parents=True, exist_ok=True)
     sync_playwright = _playwright()
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(config.ucl_profile_dir),
-            headless=False,
-            **_launch_kwargs(),
-        )
+    with sync_playwright() as p, _browser_context(p, config, False) as context:
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(
             f"{UCL_LOGIN}?url=https://doi.org/10.1038/nature12373",
@@ -63,7 +82,6 @@ def login(config: Config) -> None:
         )
         print("Complete the UCL SSO/MFA login in the browser.")
         input("Press Enter here once you are logged in...")
-        context.close()
 
 
 def _proxy_url(article: Article) -> str:
@@ -78,6 +96,14 @@ def _proxy_url(article: Article) -> str:
 
 def _article_identity(url: str) -> tuple[str, str] | None:
     path = unquote(urlsplit(url).path).lower()
+    pmc = re.search(r"/articles/(?:instance/)?(?:pmc)?(\d+)(?:/|$)", path)
+    if pmc and urlsplit(url).hostname in {
+        "pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+    }:
+        return "pmc", pmc[1]
+    ovid = re.search(r"/jnls/([^/]+)/(?:abstract|fulltext|pdf)/([^/~]+)", path)
+    if ovid:
+        return "ovid", f"{ovid[1]}/{ovid[2]}"
     pii = re.search(r"/(?:pii|retrieve/pii)/([a-z0-9]+)", path)
     if pii:
         return "pii", pii[1]
@@ -168,7 +194,40 @@ def _candidate_urls(page) -> list[str]:
     return []
 
 
-def _browser_pdf(page, url: str, destination: Path, *, referer: str | None = None) -> str | None:
+def _browser_fetch_pdf(page, url: str, destination: Path) -> str | None:
+    """Use the actual browser network/session after navigation or verification.
+
+    Playwright's request client uses a different network stack; inline Chrome PDF
+    viewers may also make response.body() unavailable. Neither is a missing PDF.
+    """
+    result = page.evaluate("""async url => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        try {
+        const response = await fetch(url, {credentials: 'include', signal: controller.signal});
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (!response.ok || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-')
+            return null;
+        const parts = [];
+        for (let offset = 0; offset < bytes.length; offset += 8192)
+            parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
+        return {url: response.url, data: btoa(parts.join(''))};
+        } finally { clearTimeout(timer); }
+    }""", url)
+    if not isinstance(result, dict) or not isinstance(result.get("data"), str):
+        return None
+    content = base64.b64decode(result["data"], validate=True)
+    if not is_pdf(content):
+        return None
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+    return result["url"]
+
+
+def _browser_pdf(
+    page, url: str, destination: Path, *, referer: str | None = None,
+    verification_wait: float = 0,
+) -> str | None:
     from playwright.sync_api import Error as PlaywrightError
 
     downloads = []
@@ -186,11 +245,16 @@ def _browser_pdf(page, url: str, destination: Path, *, referer: str | None = Non
                 url, wait_until="domcontentloaded", timeout=30_000, referer=referer or page.url
             )
         except PlaywrightError as exc:
-            if "net::ERR_ABORTED" not in str(exc):
+            if not any(message in str(exc) for message in (
+                "net::ERR_ABORTED", "Download is starting",
+            )):
                 raise
             navigation_error = exc
         if response and response.ok:
-            body = response.body()
+            try:
+                body = response.body()
+            except PlaywrightError:
+                body = b""  # Native Chrome may already have opened its inline PDF viewer.
             if is_pdf(body):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(body)
@@ -201,6 +265,25 @@ def _browser_pdf(page, url: str, destination: Path, *, referer: str | None = Non
                 break
             page.wait_for_timeout(250)
         if not downloads:
+            problem = access_problem(page.url, page.content())
+            if problem and "reCAPTCHA" in problem and verification_wait > 0:
+                emit("fetch", "Complete verification in Chrome; waiting up to 60 seconds")
+                deadline = time.monotonic() + verification_wait
+                while time.monotonic() < deadline and problem and not downloads:
+                    page.wait_for_timeout(1000)
+                    problem = access_problem(page.url, page.content())
+            if problem:
+                raise PdfAccessError(problem)
+        if not downloads:
+            try:
+                source = _browser_fetch_pdf(page, url, destination)
+                if source:
+                    return source
+            except PlaywrightError:
+                logger.debug("In-browser PDF request failed", exc_info=True)
+            problem = access_problem(page.url, page.content())
+            if problem:
+                raise PdfAccessError(problem)
             if navigation_error is not None:
                 raise navigation_error
             return None
@@ -227,31 +310,33 @@ def fetch(
     article: Article, destination: Path, config: Config, *, headless: bool = True
 ) -> str | None:
     profile = config.ucl_profile_dir
-    if not profile.exists():
+    if not profile.exists() and headless:
         emit("fetch", "UCL access unavailable: no saved browser profile")
         return None
     sync_playwright = _playwright()
     from playwright.sync_api import Error as PlaywrightError
 
     emit("fetch", "Starting UCL browser session")
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=str(profile), headless=headless, accept_downloads=True, **_launch_kwargs()
-        )
+    with sync_playwright() as p, _browser_context(p, config, headless) as context:
         page = context.pages[0] if context.pages else context.new_page()
-        try:
+        pmcid = normalize_pmcid(article.pmcid)
+        landings = [f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"] if pmcid else []
+        if article.url or article.doi or not landings:
+            landings.append(_proxy_url(article))
+        problems = []
+        for landing in dict.fromkeys(landings):
             try:
                 emit("fetch", "Opening publisher page through UCL")
                 response = page.goto(
-                    _proxy_url(article), wait_until="domcontentloaded", timeout=90_000
+                    landing, wait_until="domcontentloaded", timeout=90_000
                 )
             except PlaywrightError as exc:
-                if "net::ERR_" not in str(exc):
-                    raise
-                raise RuntimeError(
-                    "UCL could not open the publisher page. Check the publisher landing URL "
-                    "and complete UCL login with `papr login ucl`."
-                ) from exc
+                problems.append(
+                    "Browser could not open a PDF source. Check the publisher URL "
+                    "or complete institutional login with `papr login ucl`."
+                )
+                logger.debug("PDF landing navigation failed (%s)", type(exc).__name__)
+                continue
             if response:
                 ctype = response.headers.get("content-type", "")
                 if "application/pdf" in ctype.lower():
@@ -276,9 +361,24 @@ def fetch(
                         return r.url
                 except PlaywrightError as exc:
                     logger.debug("UCL PDF request failed (%s)", type(exc).__name__)
-                source = _browser_pdf(page, url, destination, referer=browser_headers["Referer"])
+                try:
+                    source = _browser_pdf(
+                        page, url, destination, referer=browser_headers["Referer"],
+                        verification_wait=0 if headless else 60,
+                    )
+                except PdfAccessError as exc:
+                    problems.append(str(exc))
+                    emit("fetch", str(exc))
+                    continue
+                except PlaywrightError as exc:
+                    logger.debug("Browser PDF transfer failed (%s)", type(exc).__name__)
+                    problems.append("A publisher PDF browser transfer failed; try another source.")
+                    continue
                 if source:
                     return source
-        finally:
-            context.close()
+            problem = access_problem(page.url, page.content())
+            if problem:
+                problems.append(problem)
+        if problems:
+            raise PdfAccessError(" ".join(dict.fromkeys(problems)))
     return None

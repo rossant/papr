@@ -99,6 +99,7 @@ class Prefetch:
                             key = _cache_path(article, self.config)
                             signature = (
                                 article.oa_pdf_url or "",
+                                tuple(article.oa_pdf_urls),
                                 article.pmcid or "",
                                 article.url or "",
                             )

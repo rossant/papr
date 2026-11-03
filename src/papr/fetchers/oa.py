@@ -15,6 +15,7 @@ from ..http import client, http_deadline, remaining_time
 from ..model import Article
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
+from .diagnostics import access_problem
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +84,17 @@ def _download(url: str, destination: Path | None = None) -> tuple[bytes, str, st
     with client() as c:
         r, content = _read_response(c, url, destination)
         if r.status_code >= 400:
+            emit("fetch", f"PDF source returned HTTP {r.status_code}: {urlsplit(url).hostname}")
             return None
         ctype = r.headers.get("content-type", "")
         if is_pdf(content, ctype):
             return content, str(r.url), ctype
         text = content.decode(r.encoding or "utf-8", errors="replace")
+        problem = access_problem(str(r.url), text)
+        if problem:
+            emit("fetch", problem)
+            logger.debug("%s: %s", urlsplit(url).hostname, problem)
+            return None
         if "html" not in ctype.lower() and not text.lstrip().startswith("<"):
             return None
         candidates = [html.unescape(x) for x in PDF_META_RE.findall(text)]
@@ -105,9 +112,9 @@ def _download(url: str, destination: Path | None = None) -> tuple[bytes, str, st
     return None
 
 
-def _unpaywall_url(article: Article, config: Config) -> str | None:
+def _unpaywall_urls(article: Article, config: Config) -> list[str]:
     if not article.doi or not config.unpaywall_email:
-        return None
+        return []
     emit("fetch", "Searching Unpaywall for open-access PDF")
     with client() as c:
         r = c.get(
@@ -116,9 +123,13 @@ def _unpaywall_url(article: Article, config: Config) -> str | None:
             timeout=remaining_time(),
         )
         if r.status_code >= 400:
-            return None
-        best = r.json().get("best_oa_location") or {}
-        return best.get("url_for_pdf") or best.get("url")
+            return []
+        data = r.json()
+        locations = [data.get("best_oa_location") or {}, *(data.get("oa_locations") or [])]
+        return list(dict.fromkeys(
+            url for location in locations if isinstance(location, dict)
+            for url in (location.get("url_for_pdf"), location.get("url")) if url
+        ))
 
 
 def candidate_urls(article: Article, config: Config) -> Iterator[str]:
@@ -127,6 +138,7 @@ def candidate_urls(article: Article, config: Config) -> Iterator[str]:
     direct = []
     if article.oa_pdf_url:
         direct.append(article.oa_pdf_url)
+    direct.extend(article.oa_pdf_urls)
     pmcid = normalize_pmcid(article.pmcid)
     if pmcid:
         direct.append(f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/")
@@ -136,10 +148,10 @@ def candidate_urls(article: Article, config: Config) -> Iterator[str]:
             yield url
     try:
         remaining_time()
-        upw = _unpaywall_url(article, config)
-        if upw and upw not in seen:
-            seen.add(upw)
-            yield upw
+        for url in _unpaywall_urls(article, config):
+            if url not in seen:
+                seen.add(url)
+                yield url
     except Exception:
         logger.debug("Unpaywall lookup failed", exc_info=True)
     for url in (article.url, f"https://doi.org/{article.doi}" if article.doi else None):
@@ -172,13 +184,15 @@ def fetch(article: Article, destination: Path, config: Config) -> str | None:
                 emit("fetch", f"Downloaded PDF ({size:,} bytes)")
                 return final_url
             except httpx.TimeoutException:
-                logger.debug("PDF candidate timed out: %s", url, exc_info=True)
+                logger.debug("PDF candidate timed out: %s", urlsplit(url).hostname, exc_info=True)
                 try:
                     remaining_time()
                 except httpx.TimeoutException:
                     break
             except Exception:
-                logger.debug("PDF candidate download failed: %s", url, exc_info=True)
+                logger.debug(
+                    "PDF candidate download failed: %s", urlsplit(url).hostname, exc_info=True
+                )
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)

@@ -16,6 +16,11 @@ def run(argv: list[str], config: Config) -> int:
     commands = parser.add_subparsers(dest="action", required=True)
     status_parser = commands.add_parser("status", help="show cache sizes")
     status_parser.add_argument("--json", action="store_true")
+    import_parser = commands.add_parser("import", help="verify and cache an original PDF source")
+    import_parser.add_argument("doi")
+    import_parser.add_argument("pdf", type=Path)
+    import_parser.add_argument("--pages", help="inclusive PDF source pages, e.g. 99-103")
+    import_parser.add_argument("--source-url", help="public archive record URL for provenance")
     prune_parser = commands.add_parser("prune", help="remove old orphaned artifact cache files")
     prune_parser.add_argument("--dry-run", action="store_true")
     prune_parser.add_argument(
@@ -28,6 +33,15 @@ def run(argv: list[str], config: Config) -> int:
     )
     args = parser.parse_args(argv)
     try:
+        if args.action == "import":
+            from .pdf_source import import_pdf
+
+            result = import_pdf(
+                args.doi, args.pdf, config, pages=args.pages, source_url=args.source_url
+            )
+            print(f"Verified original PDF: {result['title']} ({result['output_pages']} pages)")
+            print(f"Cached: {result['cache_path']}")
+            return 0
         if args.action == "status":
             result = status(config)
             if args.json:
@@ -53,6 +67,6 @@ def run(argv: list[str], config: Config) -> int:
             print("No orphaned artifacts eligible for pruning.")
         print(f"{len(paths)} artifact(s) {'eligible' if args.dry_run else 'pruned'}")
         return 0
-    except (ValueError, OSError, KeyError, ImportError) as exc:
+    except (ValueError, OSError, KeyError, ImportError, LookupError) as exc:
         print(f"✗ Cache: {exc}", file=sys.stderr)
         return 1

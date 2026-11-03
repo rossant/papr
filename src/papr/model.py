@@ -38,6 +38,7 @@ class Article:
     local_pdf: str | None = None
     source: str | None = None
     score: float | None = None
+    oa_pdf_urls: list[str] = field(default_factory=list)
 
     @property
     def first_creator(self) -> str:
@@ -74,6 +75,7 @@ class Article:
             self.authors = other.authors
         if self.item_type in {"", "document"} and other.item_type:
             self.item_type = other.item_type
+        self.oa_pdf_urls = list(dict.fromkeys([*self.oa_pdf_urls, *other.oa_pdf_urls]))
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,11 +110,14 @@ def article_from_dict(data: object, *, strict: bool = True) -> Article:
             )
         )
     for name, value in data.items():
-        if name in {"authors", "year", "score"}:
+        if name in {"authors", "year", "score", "oa_pdf_urls"}:
             continue
         if value is not None and not isinstance(value, str):
             raise ValueError("invalid article field")
     year = data.get("year")
+    urls = data.get("oa_pdf_urls", [])
+    if not isinstance(urls, list) or any(not isinstance(url, str) for url in urls):
+        raise ValueError("invalid PDF source URLs")
     if year is not None and (isinstance(year, bool) or not isinstance(year, int)):
         raise ValueError("invalid article year")
     score = data.get("score")

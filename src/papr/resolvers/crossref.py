@@ -65,6 +65,10 @@ def from_item(item: dict[str, Any]) -> Article:
         item_type=from_source(item.get("type")),
         source_item_type=item.get("type"),
         oa_pdf_url=pdf,
+        oa_pdf_urls=list(dict.fromkeys(
+            link["URL"] for link in links
+            if link.get("URL") and "pdf" in (link.get("content-type") or "").lower()
+        )),
         source="crossref",
     )
 

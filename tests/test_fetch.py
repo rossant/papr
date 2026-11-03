@@ -164,7 +164,7 @@ def test_direct_sources_do_not_look_up_unpaywall(tmp_path, monkeypatch, config, 
     def unexpected(*args):
         pytest.fail("Unpaywall must be lazy")
 
-    monkeypatch.setattr(oa, "_unpaywall_url", unexpected)
+    monkeypatch.setattr(oa, "_unpaywall_urls", unexpected)
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, content=b"%PDF-1.7\ndirect")
     )))
@@ -183,7 +183,7 @@ def test_unpaywall_runs_after_direct_failure(tmp_path, monkeypatch, config):
 
     def unpaywall(*args):
         calls.append("unpaywall")
-        return "https://example.org/discovered.pdf"
+        return ["https://example.org/discovered.pdf"]
 
     def respond(request):
         calls.append(request.url.path)
@@ -191,7 +191,7 @@ def test_unpaywall_runs_after_direct_failure(tmp_path, monkeypatch, config):
             200, content=b"%PDF-1.7\ndiscovered"
         )
 
-    monkeypatch.setattr(oa, "_unpaywall_url", unpaywall)
+    monkeypatch.setattr(oa, "_unpaywall_urls", unpaywall)
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     assert oa.fetch(
         Article(title="Paper", oa_pdf_url="https://example.org/direct.pdf"),
