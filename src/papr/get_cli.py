@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from time import perf_counter
 
+from .acquisition import capture_attempts
 from .artifacts import atomic_json
 from .batch_catalog import resolve_manifest
 from .batches import delivered_identities, save_manifest
@@ -80,11 +81,13 @@ def _process_item(
     prefetch: Prefetch | None,
 ) -> dict:
     label = str(item) if not isinstance(item, Article) else (item.doi or item.title)
-    row: dict = {"input": label}
+    attempts: list[dict] = []
+    row: dict = {"input": label, "acquisition_attempts": attempts}
     reporter = pipeline.reporter
     reporter.start_item(label)
     try:
-        pipeline.process(item, row, prepared, prefetch)
+        with capture_attempts(attempts):
+            pipeline.process(item, row, prepared, prefetch)
     except Exception as exc:
         logging.getLogger(__name__).debug("Processing failed: %s", label, exc_info=True)
         with pause():
@@ -95,6 +98,7 @@ def _process_item(
     finally:
         if prefetch is not None:
             prefetch.release(prepared)
+            attempts[:0] = prefetch.attempts(prepared)
         row.update(reporter.finish_item(row.get("status", "error")))
         if prefetch is not None:
             row["timings"].update(prefetch.timings(prepared))

@@ -12,9 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 
+from .acquisition import capture_attempts, record_attempt
 from .config import Config
 from .fetchers import PdfUnavailable, _cache_path, _is_local_pdf
 from .model import Article
+from .pdf import PdfValidationError, validate_pdf
 from .progress import EventBuffer, emit
 
 
@@ -62,6 +64,10 @@ class Prefetch:
         self.successful_fallbacks: dict[Path, tuple[tuple[Path, str], float]] = {}
         self.staged_paths: dict[Future, Path] = {}
         self.cache_paths: dict[Future, Path] = {}
+        self.worker_attempts: dict[Future, list[dict]] = {}
+        self.fallback_attempts: dict[Future, list[dict]] = {}
+        self.successful_attempts: dict[Path, list[dict]] = {}
+        self.related_attempts: dict[Future, Future] = {}
 
     def __enter__(self):
         self.temp = tempfile.TemporaryDirectory(prefix="papr-prefetch-")
@@ -122,13 +128,16 @@ class Prefetch:
                             if previous is None:
                                 destination = Path(self.temp.name) / f"{len(self.staged_paths)}.pdf"
                                 context = copy_context()
+                                attempts: list[dict] = []
                                 future = self.executor.submit(
                                     context.run,
                                     self._fetch,
                                     article,
                                     destination,
                                     prepared.fetch_events,
+                                    attempts,
                                 )
+                                self.worker_attempts[future] = attempts
                                 self.futures[key] = future, prepared.fetch_events
                                 self.staged_paths[future] = destination
                                 self.cache_paths[future] = key
@@ -140,10 +149,12 @@ class Prefetch:
             if pending:
                 yield pending.popleft()
 
-    def _fetch(self, article: Article, destination: Path, events: EventBuffer):
+    def _fetch(
+        self, article: Article, destination: Path, events: EventBuffer, attempts: list[dict]
+    ):
         started = perf_counter()
         try:
-            with events.capture():
+            with events.capture(), capture_attempts(attempts):
                 source = self.fetch(
                     article, destination, self.config, allow_ucl=False, refresh=self.refresh
                 )
@@ -186,19 +197,30 @@ class Prefetch:
                 except Exception:
                     pass
                 else:
+                    self.related_attempts[future] = latest
                     return self._available_result(latest, result)
             cached_fallback = self.successful_fallbacks.get(self.cache_paths[future])
             if cached_fallback is not None:
                 self.fallbacks[future], self.fallback_durations[future] = cached_fallback
+                self.fallback_attempts[future] = self.successful_attempts[
+                    self.cache_paths[future]
+                ]
             elif future not in self.fallbacks:
                 started = perf_counter()
+                self.fallback_attempts[future] = []
                 try:
-                    self.fallbacks[future] = self._ucl(prepared.article, ucl_fetch, show_browser)
+                    with capture_attempts(self.fallback_attempts[future]):
+                        self.fallbacks[future] = self._ucl(
+                            prepared.article, ucl_fetch, show_browser
+                        )
                 except Exception as exc:
                     self.fallbacks[future] = exc
                 finally:
                     self.fallback_durations[future] = perf_counter() - started
                 if isinstance(self.fallbacks[future], tuple):
+                    self.successful_attempts[self.cache_paths[future]] = (
+                        self.fallback_attempts[future]
+                    )
                     self.successful_fallbacks[self.cache_paths[future]] = (
                         self.fallbacks[future], self.fallback_durations[future]
                     )
@@ -241,6 +263,18 @@ class Prefetch:
         if isinstance(fallback, tuple):
             fallback[0].unlink(missing_ok=True)
 
+    def attempts(self, prepared: PreparedItem) -> list[dict]:
+        """Snapshot shared acquisition diagnostics after release has joined the worker."""
+        future = prepared.future
+        if future is None:
+            return []
+        related = self.related_attempts.get(future)
+        return [
+            *self.worker_attempts.get(future, []),
+            *self.worker_attempts.get(related, []),
+            *self.fallback_attempts.get(future, []),
+        ]
+
     def timings(self, prepared: PreparedItem) -> dict[str, float]:
         """Actual stage work; item duration includes time in the bounded queue.
 
@@ -268,6 +302,12 @@ class Prefetch:
             )
             if not source or not _is_local_pdf(temporary):
                 raise PdfUnavailable(f"No valid PDF found for {article.doi or article.title}")
+            try:
+                validate_pdf(temporary, article)
+            except PdfValidationError as exc:
+                record_attempt("ucl", source, reason=str(exc),
+                               recovery="Try another original PDF source")
+                raise PdfUnavailable(str(exc)) from exc
             temporary.replace(cache)
             destination = Path(self.temp.name) / f"ucl-{len(self.fallbacks)}.pdf"
             shutil.copy2(cache, destination)

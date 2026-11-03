@@ -10,14 +10,16 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..acquisition import record_attempt
 from ..config import Config
 from ..http import client, http_deadline, remaining_time
 from ..model import Article
-from ..pdf import is_pdf
+from ..pdf import PdfValidationError, is_pdf, validate_pdf
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
 from .diagnostics import access_problem
+from .repositories import repository_urls
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +96,14 @@ def _read_response(
 
 
 
-def _download(url: str, destination: Path | None = None) -> tuple[bytes, str, str] | None:
+def _download(
+    url: str, destination: Path | None = None, article: Article | None = None,
+) -> tuple[bytes, str, str] | None:
     with client() as c:
         r, content = _read_response(c, url, destination)
         if r.status_code >= 400:
             emit("fetch", f"PDF source returned HTTP {r.status_code}: {urlsplit(url).hostname}")
+            _failed_response(r, b"")
             return None
         ctype = r.headers.get("content-type", "")
         if is_pdf(content, ctype):
@@ -106,26 +111,62 @@ def _download(url: str, destination: Path | None = None) -> tuple[bytes, str, st
         text = content.decode(r.encoding or "utf-8", errors="replace")
         problem = access_problem(str(r.url), text)
         if problem:
+            record_attempt("oa", str(r.url), reason=problem, recovery=_recovery(problem))
             emit("fetch", problem)
             logger.debug("%s: %s", urlsplit(url).hostname, problem)
             return None
         if "html" not in ctype.lower() and not text.lstrip().startswith("<"):
+            record_attempt("oa", str(r.url), reason="Response is not a PDF or HTML landing page")
             return None
         links = _PdfLinks()
         links.feed(text)
         candidates = rank_candidate_urls(
             str(r.url), links.links, links.citation, allow_generic=True
         )
+        record_attempt(
+            "oa", str(r.url), outcome="discovered" if candidates else "failed",
+            reason="Publisher PDF links found" if candidates else "No matching PDF links found",
+            recovery=None if candidates else "Try another repository or import an original PDF",
+        )
         for pdf_url in candidates[:8]:
             try:
                 emit("fetch", "Following publisher PDF link")
                 pr, pdf_content = _read_response(c, pdf_url, destination)
             except httpx.HTTPError:
+                record_attempt("oa", pdf_url, reason="PDF link request failed",
+                               recovery="Retry the source or try another repository")
                 logger.debug("PDF link download failed: %s", pdf_url, exc_info=True)
                 continue
             if pr.status_code < 400 and is_pdf(pdf_content, pr.headers.get("content-type", "")):
+                if article is not None and destination is not None:
+                    try:
+                        validate_pdf(destination, article)
+                    except PdfValidationError as exc:
+                        record_attempt("oa", str(pr.url), reason=str(exc),
+                                       recovery="Try another original PDF source")
+                        continue
                 return pdf_content, str(pr.url), pr.headers.get("content-type", "")
+            _failed_response(pr, pdf_content)
     return None
+
+
+def _recovery(problem: str) -> str:
+    if "country mismatch" in problem:
+        return "Try a repository copy or ask the library to check PDF-host proxy routing"
+    return "Retry with --show-browser and complete browser verification"
+
+
+def _failed_response(response: httpx.Response, content: bytes) -> None:
+    problem = access_problem(str(response.url), content.decode("utf-8", errors="replace"))
+    status = response.status_code
+    record_attempt(
+        "oa", str(response.url), status_code=status,
+        reason=problem or (f"HTTP {status}" if status >= 400 else "Response is not a PDF"),
+        recovery=_recovery(problem) if problem else (
+            "Retry with --show-browser or try a repository copy" if status in {401, 403}
+            else "Try another repository or import an original PDF"
+        ),
+    )
 
 
 def _unpaywall_urls(article: Article, config: Config) -> list[str]:
@@ -139,13 +180,18 @@ def _unpaywall_urls(article: Article, config: Config) -> list[str]:
             timeout=remaining_time(),
         )
         if r.status_code >= 400:
+            record_attempt("unpaywall", str(r.url), reason=f"HTTP {r.status_code}",
+                           status_code=r.status_code, recovery="Retry discovery later")
             return []
         data = r.json()
         locations = [data.get("best_oa_location") or {}, *(data.get("oa_locations") or [])]
-        return list(dict.fromkeys(
+        urls = list(dict.fromkeys(
             url for location in locations if isinstance(location, dict)
             for url in (location.get("url_for_pdf"), location.get("url")) if url
         ))
+        record_attempt("unpaywall", str(r.url), outcome="discovered" if urls else "unavailable",
+                       reason="PDF locations found" if urls else "No open-access locations found")
+        return urls
 
 
 def candidate_urls(article: Article, config: Config) -> Iterator[str]:
@@ -169,7 +215,26 @@ def candidate_urls(article: Article, config: Config) -> Iterator[str]:
                 seen.add(url)
                 yield url
     except Exception:
+        record_attempt("unpaywall", reason="Open-access discovery request failed",
+                       recovery="Check the configured email and retry discovery later")
         logger.debug("Unpaywall lookup failed", exc_info=True)
+    try:
+        remaining_time()
+        repositories = repository_urls(article, config)
+        if article.doi:
+            record_attempt(
+                "repository", outcome="discovered" if repositories else "unavailable",
+                reason="Published repository copies found" if repositories
+                else "No published repository copies found",
+            )
+        for url in repositories:
+            if url not in seen:
+                seen.add(url)
+                yield url
+    except Exception:
+        record_attempt("repository", reason="Repository discovery request failed",
+                       recovery="Retry repository discovery later")
+        logger.debug("Repository lookup failed", exc_info=True)
     for url in (article.url, f"https://doi.org/{article.doi}" if article.doi else None):
         if url and url not in seen:
             seen.add(url)
@@ -188,24 +253,33 @@ def fetch(article: Article, destination: Path, config: Config) -> str | None:
                     dir=destination.parent, suffix=".oa.pdf", delete=False
                 ) as output:
                     temporary = Path(output.name)
-                result = _download(url, temporary)
+                result = _download(url, temporary, article)
                 if not result:
                     continue
                 content, final_url, _ = result
                 # The public bytes mode remains useful for small callers and tests.
                 if temporary.stat().st_size == 0:
                     temporary.write_bytes(content)
+                validate_pdf(temporary, article)
                 size = temporary.stat().st_size
                 temporary.replace(destination)
+                record_attempt("oa", final_url, outcome="success")
                 emit("fetch", f"Downloaded PDF ({size:,} bytes)")
                 return final_url
             except httpx.TimeoutException:
+                record_attempt("oa", url, reason="PDF download timed out",
+                               recovery="Retry the source or try another repository")
                 logger.debug("PDF candidate timed out: %s", urlsplit(url).hostname, exc_info=True)
                 try:
                     remaining_time()
                 except httpx.TimeoutException:
                     break
+            except PdfValidationError as exc:
+                record_attempt("oa", final_url, reason=str(exc),
+                               recovery="Try another original PDF source")
             except Exception:
+                record_attempt("oa", url, reason="PDF source request failed",
+                               recovery="Retry the source or try another repository")
                 logger.debug(
                     "PDF candidate download failed: %s", urlsplit(url).hostname, exc_info=True
                 )

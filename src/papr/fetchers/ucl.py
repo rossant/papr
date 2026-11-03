@@ -7,9 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from ..acquisition import record_attempt
 from ..config import Config
 from ..model import Article
-from ..pdf import is_pdf
+from ..pdf import PdfValidationError, is_pdf, validate_pdf
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from . import browser_pdf as _browser_pdf_transport
@@ -141,6 +142,8 @@ def fetch(
     profile = config.ucl_profile_dir
     if not profile.exists() and headless:
         emit("fetch", "UCL access unavailable: no saved browser profile")
+        record_attempt("ucl", outcome="unavailable", reason="No saved browser profile",
+                       recovery="Run papr login ucl before retrying institutional access")
         return None
     sync_playwright = _playwright()
     from playwright.sync_api import Error as PlaywrightError
@@ -160,6 +163,8 @@ def fetch(
                     landing, wait_until="domcontentloaded", timeout=90_000
                 )
             except PlaywrightError as exc:
+                record_attempt("ucl", landing, reason="Browser could not open landing page",
+                               recovery="Run papr login ucl or check the publisher URL")
                 problems.append(
                     "Browser could not open a PDF source. Check the publisher URL "
                     "or complete institutional login with `papr login ucl`."
@@ -171,10 +176,14 @@ def fetch(
                 if "application/pdf" in ctype.lower():
                     body = response.body()
                     if is_pdf(body, ctype):
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        destination.write_bytes(body)
-                        return response.url
+                        if _save_pdf(body, destination, article, response.url):
+                            return response.url
             urls = _candidate_urls(page)
+            record_attempt(
+                "ucl", landing, outcome="discovered" if urls else "failed",
+                reason="Publisher PDF links found" if urls else "No matching PDF links found",
+                recovery=None if urls else "Try another repository or import an original PDF",
+            )
             browser_headers = {
                 "User-Agent": page.evaluate("() => navigator.userAgent"),
                 "Referer": page.url,
@@ -185,10 +194,18 @@ def fetch(
                     r = context.request.get(url, timeout=60_000, headers=browser_headers)
                     body = r.body()
                     if r.ok and is_pdf(body, r.headers.get("content-type", "")):
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        destination.write_bytes(body)
-                        return r.url
+                        if _save_pdf(body, destination, article, r.url):
+                            return r.url
+                    else:
+                        problem = access_problem(r.url, body.decode("utf-8", errors="replace"))
+                        record_attempt(
+                            "ucl", r.url, status_code=r.status,
+                            reason=problem or "Browser HTTP response is not a PDF",
+                            recovery="Retry with --show-browser or try another repository",
+                        )
                 except PlaywrightError as exc:
+                    record_attempt("ucl", url, reason="Browser HTTP request failed",
+                                   recovery="Retry with --show-browser")
                     logger.debug("UCL PDF request failed (%s)", type(exc).__name__)
                 try:
                     source = _browser_pdf_transport.browser_pdf(
@@ -196,18 +213,48 @@ def fetch(
                         verification_wait=0 if headless else 60,
                     )
                 except PdfAccessError as exc:
+                    record_attempt("browser", url, reason=str(exc),
+                                   recovery="Retry with --show-browser or try another repository")
                     problems.append(str(exc))
                     emit("fetch", str(exc))
                     continue
                 except PlaywrightError as exc:
+                    record_attempt("browser", url, reason="Browser PDF transfer failed",
+                                   recovery="Try another original PDF source")
                     logger.debug("Browser PDF transfer failed (%s)", type(exc).__name__)
                     problems.append("A publisher PDF browser transfer failed; try another source.")
                     continue
                 if source:
-                    return source
+                    try:
+                        validate_pdf(destination, article)
+                    except PdfValidationError as exc:
+                        record_attempt("browser", source, reason=str(exc),
+                                       recovery="Try another original PDF source")
+                        destination.unlink(missing_ok=True)
+                    else:
+                        record_attempt("browser", source, outcome="success")
+                        return source
+                else:
+                    record_attempt("browser", url, reason="Browser returned no PDF",
+                                   recovery="Try another original PDF source")
             problem = access_problem(page.url, page.content())
             if problem:
+                record_attempt("ucl", page.url, reason=problem,
+                               recovery="Retry with --show-browser or try another repository")
                 problems.append(problem)
         if problems:
             raise PdfAccessError(" ".join(dict.fromkeys(problems)))
     return None
+
+
+def _save_pdf(content: bytes, destination: Path, article: Article, url: str) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(content)
+    try:
+        validate_pdf(destination, article)
+    except PdfValidationError as exc:
+        record_attempt("ucl", url, reason=str(exc), recovery="Try another original PDF source")
+        destination.unlink(missing_ok=True)
+        return False
+    record_attempt("ucl", url, outcome="success")
+    return True

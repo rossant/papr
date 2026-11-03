@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
+from pdf_helpers import pdf_bytes
 
 from papr.fetchers import browser_pdf, ucl
 
@@ -182,6 +183,8 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
     page.evaluate.return_value = "Browser User Agent"
     page.goto.return_value.headers = {"content-type": "text/html"}
     context.request.get.return_value.ok = False
+    context.request.get.return_value.url = "https://publisher.test/articles/paper/pdf"
+    context.request.get.return_value.status = 403
     context.request.get.return_value.body.return_value = b"Forbidden"
     monkeypatch.setattr(ucl, "_playwright", lambda: lambda: manager)
     monkeypatch.setattr(ucl, "_launch_kwargs", lambda: {})
@@ -193,7 +196,11 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
     monkeypatch.setattr(ucl, "native_context", native)
     pdf_url = "https://publisher.test/articles/paper/pdf"
     monkeypatch.setattr(ucl, "_candidate_urls", lambda page: [pdf_url])
-    fallback = MagicMock(return_value=pdf_url)
+    def save_original(page, url, destination, **kwargs):
+        destination.write_bytes(pdf_bytes())
+        return pdf_url
+
+    fallback = MagicMock(side_effect=save_original)
     monkeypatch.setattr(browser_pdf, "browser_pdf", fallback)
     destination = tmp_path / "paper.pdf"
     assert (
