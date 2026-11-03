@@ -19,6 +19,15 @@ def checksum(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def _publish(temporary: Path, destination: Path, *, overwrite: bool) -> None:
+    if overwrite:
+        if destination.exists():
+            temporary.chmod(destination.stat().st_mode & 0o777)
+        temporary.replace(destination)
+    else:
+        destination.hardlink_to(temporary)
+
+
 def atomic_copy(source: Path, destination: Path, *, overwrite: bool) -> None:
     """Publish a complete file; exclusive linking protects existing destinations."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -27,12 +36,25 @@ def atomic_copy(source: Path, destination: Path, *, overwrite: bool) -> None:
         with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
             temporary = Path(stream.name)
         shutil.copy2(source, temporary)
-        if overwrite:
-            if destination.exists():
-                temporary.chmod(destination.stat().st_mode & 0o777)
-            temporary.replace(destination)
-        else:
-            destination.hardlink_to(temporary)
+        _publish(temporary, destination, overwrite=overwrite)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def atomic_text(destination: Path, text: str, *, overwrite: bool) -> None:
+    """Write UTF-8 text completely before replacing or exclusively linking it."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=destination.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish(temporary, destination, overwrite=overwrite)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

@@ -64,12 +64,12 @@ def basename(article: Article, config: Config, override: str | None = None) -> s
 
 
 def collision_safe_path(path: Path, *, overwrite: bool = False) -> Path:
-    if overwrite or not path.exists():
+    if overwrite or not (path.exists() or path.is_symlink()):
         return path
     stem, suffix = path.stem, path.suffix
     i = 2
     while True:
         candidate = path.with_name(f"{stem}_{i}{suffix}")
-        if not candidate.exists():
+        if not (candidate.exists() or candidate.is_symlink()):
             return candidate
         i += 1

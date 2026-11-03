@@ -14,7 +14,7 @@ from . import __version__
 from .compress_cli import _atomic_pdf_copy as _atomic_pdf_copy
 from .compress_cli import _compress_parser, _run_compress
 from .config import DEFAULT_TEMPLATE, Config, set_setting
-from .export import FORMAT_SUFFIX, export_outputs, output_suffix
+from .export import FORMAT_SUFFIX, ExportError, export_outputs, output_suffix
 from .fetchers import fetch_pdf, ucl
 from .filename import basename
 from .http import http_session
@@ -514,29 +514,39 @@ def _run_get_reported(args: argparse.Namespace, config: Config, reporter: Report
                     export_options = {}
                     if "pdf" in local_formats:
                         export_options["pdf_output"] = prepared_pdf
-                    outputs, processor_used = export_outputs(
-                        article,
-                        pdf,
-                        local_formats,
-                        local_output,
-                        config,
-                        filename_template=args.filename,
-                        processor=args.processor,
-                        overwrite=args.overwrite,
-                        **export_options,
-                    )
+                    export_error = None
+                    try:
+                        outputs, processor_used = export_outputs(
+                            article,
+                            pdf,
+                            local_formats,
+                            local_output,
+                            config,
+                            filename_template=args.filename,
+                            processor=args.processor,
+                            overwrite=args.overwrite,
+                            **export_options,
+                        )
+                    except ExportError as exc:
+                        outputs, processor_used = exc.outputs, exc.processor
+                        export_error = exc
                     row.update(
                         status="ok",
                         source=source,
                         processor=processor_used,
                         outputs=[str(path) for path in outputs],
                     )
-                    row.update(record_artifacts(article, outputs, config), export_status="ok")
+                    row.update(
+                        record_artifacts(article, outputs, config),
+                        export_status="partial" if export_error else "ok",
+                    )
                     exported_pdf = next((path for path in outputs if path.suffix == ".pdf"), None)
                     if exported_pdf is not None:
                         from .history import record_download
 
                         record_download(article, exported_pdf, config)
+                    if export_error is not None:
+                        raise export_error
                     if args.zotero:
                         from .zotero import save
 

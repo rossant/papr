@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import tempfile
 from pathlib import Path
 
+from .artifacts import atomic_copy, atomic_text
 from .config import Config
 from .filename import basename, collision_safe_path
 from .formats import bib, csl
@@ -25,6 +25,15 @@ FORMAT_SUFFIX = {
 }
 
 
+class ExportError(Exception):
+    """A later export failed after these outputs were successfully published."""
+
+    def __init__(self, message: str, outputs: list[Path], processor: str | None):
+        super().__init__(message)
+        self.outputs = list(outputs)
+        self.processor = processor
+
+
 def output_suffix(format_name: str, formats: list[str]) -> str:
     if format_name == "bibtex" and "bib" in formats:
         return ".bibtex.bib"
@@ -32,10 +41,31 @@ def output_suffix(format_name: str, formats: list[str]) -> str:
 
 
 def _write(path: Path, text: str, overwrite: bool) -> Path:
-    path = collision_safe_path(path, overwrite=overwrite)
-    emit("export", f"Writing {path.name}")
-    path.write_text(text, encoding="utf-8")
-    return path
+    while True:
+        destination = collision_safe_path(path, overwrite=overwrite)
+        emit("export", f"Writing {destination.name}")
+        try:
+            atomic_text(destination, text, overwrite=overwrite)
+        except FileExistsError:
+            if overwrite:
+                raise
+            continue
+        return destination
+
+
+def _copy(source: Path, path: Path, overwrite: bool) -> Path:
+    while True:
+        destination = collision_safe_path(path, overwrite=overwrite)
+        emit("export", f"Saving {destination.name}")
+        if source.resolve() == destination.resolve():
+            return destination
+        try:
+            atomic_copy(source, destination, overwrite=overwrite)
+        except FileExistsError:
+            if overwrite:
+                raise
+            continue
+        return destination
 
 
 def export_outputs(
@@ -55,33 +85,36 @@ def export_outputs(
     outputs: list[Path] = []
     processor_used: str | None = None
 
-    if "pdf" in formats:
-        dest = collision_safe_path(output_dir / f"{base}.pdf", overwrite=overwrite)
-        emit("export", f"Saving {dest.name}")
-        source_pdf = pdf_output if pdf_output is not None else pdf
-        if source_pdf.resolve() != dest.resolve():
-            shutil.copy2(source_pdf, dest)
-        outputs.append(dest)
-    if "md" in formats:
-        text, processor_used = _cached_markdown(pdf, config, processor)
-        outputs.append(_write(output_dir / f"{base}.md", text, overwrite))
-    if "txt" in formats:
-        outputs.append(_write(output_dir / f"{base}.txt", extract_text(pdf), overwrite))
-    if "bib" in formats:
-        outputs.append(
-            _write(output_dir / f"{base}.bib", bib.encode(article, biblatex=True), overwrite)
-        )
-    if "bibtex" in formats:
-        suffix = output_suffix("bibtex", formats)
-        outputs.append(
-            _write(output_dir / f"{base}{suffix}", bib.encode(article, biblatex=False), overwrite)
-        )
-    if "csl" in formats:
-        text = json.dumps([csl.encode(article)], indent=2, ensure_ascii=False) + "\n"
-        outputs.append(_write(output_dir / f"{base}.csl.json", text, overwrite))
-    if "json" in formats:
-        text = json.dumps(article.to_dict(), indent=2, ensure_ascii=False) + "\n"
-        outputs.append(_write(output_dir / f"{base}.json", text, overwrite))
+    try:
+        if "pdf" in formats:
+            source_pdf = pdf_output if pdf_output is not None else pdf
+            outputs.append(_copy(source_pdf, output_dir / f"{base}.pdf", overwrite))
+        if "md" in formats:
+            text, processor_used = _cached_markdown(pdf, config, processor)
+            outputs.append(_write(output_dir / f"{base}.md", text, overwrite))
+        if "txt" in formats:
+            outputs.append(_write(output_dir / f"{base}.txt", extract_text(pdf), overwrite))
+        if "bib" in formats:
+            outputs.append(
+                _write(output_dir / f"{base}.bib", bib.encode(article, biblatex=True), overwrite)
+            )
+        if "bibtex" in formats:
+            suffix = output_suffix("bibtex", formats)
+            outputs.append(
+                _write(
+                    output_dir / f"{base}{suffix}", bib.encode(article, biblatex=False), overwrite
+                )
+            )
+        if "csl" in formats:
+            text = json.dumps([csl.encode(article)], indent=2, ensure_ascii=False) + "\n"
+            outputs.append(_write(output_dir / f"{base}.csl.json", text, overwrite))
+        if "json" in formats:
+            text = json.dumps(article.to_dict(), indent=2, ensure_ascii=False) + "\n"
+            outputs.append(_write(output_dir / f"{base}.json", text, overwrite))
+    except Exception as exc:
+        if outputs:
+            raise ExportError(str(exc), outputs, processor_used) from exc
+        raise
     return outputs, processor_used
 
 
