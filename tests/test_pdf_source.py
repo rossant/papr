@@ -1,4 +1,7 @@
 
+import json
+from pathlib import Path
+
 import pytest
 from pypdf import PdfReader, PdfWriter
 
@@ -83,3 +86,74 @@ def test_cache_import_command_uses_verified_page_selection(archive, capsys):
     assert run(["import", article.doi, str(path), "--pages", "2-3"], config) == 0
     assert "Verified original PDF" in capsys.readouterr().out
     assert len(PdfReader(_cache_path(article, config)).pages) == 2
+
+
+@pytest.mark.parametrize(("doi_on_page", "accepted"), [
+    ("10.1234/original-wrong", False),
+    ("10.1234/original/extra", False),
+    ("https://doi.org/10.1234/ORIGINAL.", True),
+    ("(doi:10.1234/original).", True),
+])
+def test_archive_import_compares_complete_normalized_dois(
+    archive, monkeypatch, doi_on_page, accepted,
+):
+    path, article, config = archive
+    real_reader = pdf_source.PdfReader
+
+    class Page:
+        def extract_text(self):
+            return f"Paper title {doi_on_page}"
+
+    reader = real_reader(path)
+    monkeypatch.setattr(reader.pages[1], "extract_text", Page().extract_text)
+    monkeypatch.setattr(pdf_source, "PdfReader", lambda *args: reader)
+    if accepted:
+        assert pdf_source.import_pdf(article.doi, path, config, pages="2-3")
+    else:
+        with pytest.raises(ValueError, match="first selected page"):
+            pdf_source.import_pdf(article.doi, path, config, pages="2-3")
+        assert not _cache_path(article, config).exists()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("failure", ["serialization", "cache", "provenance"])
+def test_import_publication_failures_preserve_cache_and_provenance(
+    archive, monkeypatch, existing, failure,
+):
+    path, article, config = archive
+    cache = _cache_path(article, config)
+    provenance = config.data_dir / "pdf-sources" / f"{cache.stem}.json"
+    previous_cache = b"%PDF-prior-verified-copy"
+    previous_record = {"sha256": "previous", "title": "Previous source"}
+    if existing:
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(previous_cache)
+        provenance.parent.mkdir(parents=True)
+        provenance.write_text(json.dumps(previous_record))
+    replace = Path.replace
+    atomic_json = pdf_source.atomic_json
+
+    def failing_replace(source, destination):
+        if (failure == "cache" and source.name == "verified.pdf") or (
+            failure == "provenance" and Path(destination) == provenance
+        ):
+            raise OSError("publication failed")
+        return replace(source, destination)
+
+    def failing_json(target, record):
+        if failure == "serialization":
+            raise OSError("publication failed")
+        return atomic_json(target, record)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    monkeypatch.setattr(pdf_source, "atomic_json", failing_json)
+    with pytest.raises(OSError, match="publication failed"):
+        pdf_source.import_pdf(article.doi, path, config, pages="2-3")
+    if existing:
+        assert cache.read_bytes() == previous_cache
+        assert json.loads(provenance.read_text()) == previous_record
+    else:
+        assert not cache.exists()
+        assert not provenance.exists()
+    assert list(cache.parent.glob("import-*")) == []
+    assert list(provenance.parent.glob("*.tmp")) == []

@@ -16,12 +16,39 @@ from .config import Config
 from .fetchers import _cache_path
 from .locking import state_lock
 from .resolvers import resolve
-from .resolvers.common import normalize_doi
+from .resolvers.common import DOI_RE, normalize_doi
 from .selection import select_candidate
 
 
 def _normalized(text: str) -> str:
     return re.sub(r"[^\w]", "", text.casefold())
+
+
+def _publish(prepared: Path, cache: Path, provenance: Path, record: dict) -> None:
+    """Stage both files and restore the prior cache if provenance cannot publish.
+
+    The caller holds the state lock. Each rename is atomic; a failed operation
+    must not leave new provenance describing an earlier cache entry.
+    """
+    provenance.parent.mkdir(parents=True, exist_ok=True)
+    backup = prepared.parent / "previous.pdf"
+    if cache.exists():
+        backup.hardlink_to(cache)
+    with tempfile.NamedTemporaryFile(dir=provenance.parent, suffix=".tmp", delete=False) as file:
+        staged_record = Path(file.name)
+    try:
+        atomic_json(staged_record, record)
+        prepared.replace(cache)
+        try:
+            staged_record.replace(provenance)
+        except BaseException:
+            if backup.exists():
+                backup.replace(cache)
+            else:
+                cache.unlink(missing_ok=True)
+            raise
+    finally:
+        staged_record.unlink(missing_ok=True)
 
 
 def import_pdf(
@@ -66,7 +93,8 @@ def import_pdf(
     if not (1 <= start <= end <= len(reader.pages)):
         raise ValueError("Selected pages are outside the PDF source")
     first = reader.pages[start - 1].extract_text() or ""
-    if identifier not in first.casefold() or (
+    page_dois = {normalize_doi(match.group()) for match in DOI_RE.finditer(first)}
+    if identifier not in page_dois or (
         not _normalized(article.title) or _normalized(article.title) not in _normalized(first)
     ):
         raise ValueError(
@@ -98,6 +126,6 @@ def import_pdf(
                 "cache_path": str(cache), "sha256": checksum(prepared),
                 "method": "original-pages" if selected else "original-pdf",
             }
-            atomic_json(config.data_dir / "pdf-sources" / f"{cache.stem}.json", record)
-            prepared.replace(cache)
+            provenance = config.data_dir / "pdf-sources" / f"{cache.stem}.json"
+            _publish(prepared, cache, provenance, record)
     return record
