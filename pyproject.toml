@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ucl = ["playwright>=1.50"]
+compression = ["pymupdf==2.1", "pillow>=10,<13"]
 
 [project.scripts]
 papr = "papr.cli:main"
