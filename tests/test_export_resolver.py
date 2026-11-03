@@ -203,3 +203,15 @@ def test_newer_verified_delivery_is_preferred_to_an_earlier_export(tmp_path, con
         payload["created_at"] = date
         path.write_text(json.dumps(payload))
     assert exports.by_doi(article.doi, config).local_pdf == str(newer)
+
+
+def test_replaced_export_does_not_hide_a_verified_cached_copy(tmp_path, config):
+    article, pdf, artifact, _ = record(tmp_path, config)
+    original = pdf.read_bytes()
+    replacement = pdf_bytes(text="A different file now at the original export path")
+    pdf.write_bytes(replacement)
+    result = exports.by_doi(article.doi, config)
+    assert result is not None
+    assert result.local_pdf == str(config.cache_dir / "artifacts" / artifact["sha256"])
+    assert (config.cache_dir / "artifacts" / artifact["sha256"]).read_bytes() == original
+    assert pdf.read_bytes() == replacement

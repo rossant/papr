@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ..artifacts import locate
+from ..artifacts import cache_path, checksum, locate
 from ..batch_catalog import known_manifest_paths
 from ..batches import load_manifest
 from ..config import Config
@@ -55,7 +55,14 @@ def _load(config: Config) -> list[Article]:
                 if key in validated:
                     continue
                 try:
-                    pdf = locate(Path(artifact["path"]), artifact["sha256"], config)
+                    try:
+                        pdf = locate(Path(artifact["path"]), artifact["sha256"], config)
+                    except ValueError:
+                        # An overwritten export must not hide a still verified
+                        # cache copy. Reuse that copy without modifying the user's file.
+                        pdf = cache_path(artifact["sha256"], config)
+                        if not pdf.is_file() or checksum(pdf) != artifact["sha256"]:
+                            continue
                     validate_pdf(pdf, article)
                 except (OSError, ValueError):
                     logger.debug("Papr exported PDF unavailable: %s", artifact["path"],
