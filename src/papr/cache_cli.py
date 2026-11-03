@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
+
 from .cache import prune, status
 from .config import Config
 
@@ -21,6 +23,11 @@ def run(argv: list[str], config: Config) -> int:
     import_parser.add_argument("pdf", type=Path)
     import_parser.add_argument("--pages", help="inclusive PDF source pages, e.g. 99-103")
     import_parser.add_argument("--source-url", help="public archive record URL for provenance")
+    discover_parser = commands.add_parser(
+        "discover", help="find possible public archive or thesis records for a DOI"
+    )
+    discover_parser.add_argument("doi")
+    discover_parser.add_argument("--json", action="store_true")
     prune_parser = commands.add_parser("prune", help="remove old orphaned artifact cache files")
     prune_parser.add_argument("--dry-run", action="store_true")
     prune_parser.add_argument(
@@ -41,6 +48,27 @@ def run(argv: list[str], config: Config) -> int:
             )
             print(f"Verified original PDF: {result['title']} ({result['output_pages']} pages)")
             print(f"Cached: {result['cache_path']}")
+            return 0
+        if args.action == "discover":
+            from .archive_discovery import discover
+
+            try:
+                results = discover(args.doi, config)
+            except httpx.HTTPError:
+                # HTTP errors may include signed URLs; keep diagnostics secret-free.
+                raise ValueError("Archive discovery request failed") from None
+            if args.json:
+                print(json.dumps(results, indent=2, ensure_ascii=False))
+            elif not results:
+                print("No possible archive records found.")
+            else:
+                print(
+                    "Possible records (unverified; inspect the record and select pages explicitly):"
+                )
+                for index, item in enumerate(results, 1):
+                    print(f"{index}. [{item['type']}] {item['title']}")
+                    print(f"   {item['url']}")
+                    print(f"   Why: {item['reason']} — {item['verification']}")
             return 0
         if args.action == "status":
             result = status(config)
