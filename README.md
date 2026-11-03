@@ -59,6 +59,19 @@ and asks you to choose interactively.
 If the selected local record already has an attached PDF, that local PDF is used
 before any OA, publisher, or UCL request.
 
+Papr also searches its recorded successful PDF exports as a local source, after
+Zotero/Zolit lookup. It matches the recorded bibliography and verifies the PDF's
+checksum and structure before reuse. If an exported file was moved, a matching
+copy in papr's artifact cache can supply it. Published PDFs remain reusable even
+when a later conversion or Zotero save failed. Changed, unreadable, or unfinished
+outputs are skipped so another source can be tried. More recent recorded
+deliveries take precedence over older exports of the same paper.
+
+Ordinary requests use all these sources automatically. `--local-only` confines
+resolution to local libraries and recorded exports; `--no-local` deliberately
+disables them and is useful for testing remote access. A remote-source failure
+does not make a request fail when a usable local PDF is available.
+
 Exact DOI and PMID inputs, and imported references with confident local matches,
 follow the same priority: a known local PDF is used first.
 
@@ -627,7 +640,10 @@ shows successes, failures, cache hits, elapsed time, and the output directory.
 The `acquisition_attempts` list records each HTTP/browser source attempted,
 discovery results, cache use, and validation failures, including on failed items.
 Entries include `source`, `outcome`, and, when available, `url`, `status_code`,
-`reason`, and `recovery`. URLs in this list omit credentials, query parameters,
+`content_type`, `error_code`, `reason`, and `recovery`. Browser failures preserve
+recognized codes such as `net::ERR_BLOCKED_BY_CLIENT`; blocked routes are
+distinguished from sign-in pages, HTML PDF viewers, and browser challenges.
+URLs in this list omit credentials, query parameters,
 and fragments. The same attempts are retained in the batch manifest; duplicate
 references share acquisition diagnostics, and concurrent papers keep separate logs.
 During concurrent fetching, `duration` runs from preparation through publication,
@@ -767,6 +783,7 @@ The main implementation boundaries are:
 | `fetchers/candidates.py`, `fetchers/oa.py` | Shared article-aware PDF link ranking and HTTP acquisition |
 | `fetchers/browser.py`, `fetchers/browser_pdf.py`, `fetchers/ucl.py` | Chrome lifetime, PDF transfer, and institutional access orchestration |
 | `resolvers/zotero*.py` | Read-only reference matching, HTTP discovery, SQLite snapshots, and metadata conversion |
+| `resolvers/exports.py` | Local reuse of recorded delivered PDFs, with checksum and identity checks |
 | `zotero.py`, `zotero_api.py`, `zotero_attachments.py` | Import reconciliation, authorized desktop transport, and attachments |
 | `pdf.py`, `pdf_source.py` | Signature and structural/identity validation; verified archive-page imports |
 | `acquisition.py`, `fetchers/repositories.py` | Scoped attempt diagnostics and exact-DOI repository discovery |
