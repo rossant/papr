@@ -52,6 +52,18 @@ class Article:
 
     def merge(self, other: Article) -> Article:
         """Fill missing fields from another representation of the same work."""
+        pdf_urls = list(
+            dict.fromkeys(
+                url
+                for url in (
+                    self.oa_pdf_url,
+                    *self.oa_pdf_urls,
+                    other.oa_pdf_url,
+                    *other.oa_pdf_urls,
+                )
+                if url
+            )
+        )
         for name in (
             "year",
             "journal",
@@ -75,7 +87,7 @@ class Article:
             self.authors = other.authors
         if self.item_type in {"", "document"} and other.item_type:
             self.item_type = other.item_type
-        self.oa_pdf_urls = list(dict.fromkeys([*self.oa_pdf_urls, *other.oa_pdf_urls]))
+        self.oa_pdf_urls = pdf_urls
         return self
 
     def to_dict(self) -> dict[str, Any]:
