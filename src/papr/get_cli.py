@@ -129,6 +129,27 @@ def _finish_reports(pipeline: GetPipeline, report: list[dict]) -> int:
     return 1 if failures else 0
 
 
+def process_items(pipeline: GetPipeline, items: list[str | Article | Path]) -> list[dict]:
+    """Run the shared ordered serial/prefetch pipeline without saving a manifest."""
+    args, config = pipeline.args, pipeline.config
+    jobs = args.jobs or config.jobs
+    concurrent = jobs > 1 and not (pipeline.interactive or args.dry_run or args.rename)
+    pool = Prefetch(
+        items, pipeline.prepare, pipeline.services.fetch_pdf, config, jobs=jobs,
+        refresh=args.refresh,
+    )
+    rows = []
+    with pool if concurrent else nullcontext() as prefetch:
+        pipeline.reporter.start_batch(len(items))
+        if prefetch is None:
+            for item in items:
+                rows.append(_process_item(pipeline, item, None, None))
+        else:
+            for prepared in prefetch:
+                rows.append(_process_item(pipeline, prepared.item, prepared, prefetch))
+    return rows
+
+
 def _run_reported(
     args: argparse.Namespace,
     config: Config,
@@ -152,19 +173,7 @@ def _run_reported(
     pipeline = GetPipeline(args, config, reporter, services, excluded, interactive)
     report: list[dict] = []
     items = _load_inputs(args.inputs, config, report)
-    jobs = args.jobs or config.jobs
-    concurrent = jobs > 1 and not (interactive or args.dry_run or args.rename)
-    pool = Prefetch(
-        items, pipeline.prepare, services.fetch_pdf, config, jobs=jobs, refresh=args.refresh
-    )
-    with pool if concurrent else nullcontext() as prefetch:
-        reporter.start_batch(len(items))
-        if prefetch is None:
-            for item in items:
-                report.append(_process_item(pipeline, item, None, None))
-        else:
-            for prepared in prefetch:
-                report.append(_process_item(pipeline, prepared.item, prepared, prefetch))
+    report.extend(process_items(pipeline, items))
     return _finish_reports(pipeline, report)
 
 

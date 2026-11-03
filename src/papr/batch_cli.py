@@ -11,15 +11,31 @@ from pathlib import Path
 from .artifacts import locate
 from .batch_catalog import list_manifests, manifest_summary, resolve_manifest
 from .batches import export_batch, load_manifest, save_manifest
+from .cli_arguments import _formats, _positive_int
 from .config import Config
 from .locking import state_lock
 
 
 def run(argv: list[str], config: Config) -> int:
-    parser = argparse.ArgumentParser(prog="papr batch", description="Inspect or re-export a batch.")
+    parser = argparse.ArgumentParser(
+        prog="papr batch", description="Inspect, re-export, or retry a batch."
+    )
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("list", help="List known batches")
     commands.choices["list"].add_argument("--json", action="store_true", dest="as_json")
+    retry = commands.add_parser("retry", help="Retry failed resolution and PDF acquisition")
+    retry.add_argument("manifest", help="manifest path, batch name, or batch ID")
+    retry.add_argument("-o", "--output", type=Path)
+    retry.add_argument("-f", "--format", type=_formats, dest="formats")
+    retry.add_argument("--show-browser", action="store_true")
+    retry.add_argument("--oa-only", action="store_true")
+    retry.add_argument("--jobs", type=_positive_int)
+    retry.add_argument("--non-interactive", action="store_true")
+    retry.add_argument("--dry-run", action="store_true", help="Plan without network or writes")
+    retry.add_argument("--report", type=Path)
+    retry.add_argument("--manifest", type=Path, dest="new_manifest")
+    retry.add_argument("--name")
+    retry.add_argument("--overwrite", action="store_true", help="Replace colliding outputs")
     for action in ("show", "summary", "check", "export", "resume"):
         command = commands.add_parser(action)
         command.add_argument("manifest", help="manifest path, batch name, or batch ID")
@@ -79,6 +95,21 @@ def run(argv: list[str], config: Config) -> int:
                         print(f"✓ {found}")
                         checked += 1
             print(f"{checked} artifact(s) verified")
+        elif args.action == "retry":
+            from . import cli
+            from .batch_retry import run as retry_batch
+            from .get_pipeline import GetServices
+
+            manifest_path = resolve_manifest(args.manifest, config)
+            data = load_manifest(manifest_path)
+            output = args.output or _resume_output(data, config)
+            return retry_batch(
+                args, data, manifest_path, output, config,
+                GetServices(
+                    cli._resolve_item, cli.fetch_pdf, cli.export_outputs,
+                    cli.basename, cli._article_line,
+                ),
+            )
         else:
             manifest_path = resolve_manifest(args.manifest, config)
             data = load_manifest(manifest_path)
