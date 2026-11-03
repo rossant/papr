@@ -698,6 +698,19 @@ uv run ruff check .
 uv build
 ```
 
+The base test run does not install the optional UCL browser dependency. To run
+the full suite including Playwright-backed browser unit tests, sync with the
+`ucl` extra:
+
+```bash
+uv sync --locked --extra ucl --dev
+uv run pytest
+```
+
+These tests use mocked browser objects and do not need Chrome or a desktop. The
+optional native Chrome attachment integration test does require Chrome/Chromium
+and a desktop display; run it separately as described above.
+
 If `papr` is installed as an editable uv tool, source edits are picked up
 immediately, but dependency changes require reinstalling the tool environment:
 
