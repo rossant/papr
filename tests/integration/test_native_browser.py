@@ -9,7 +9,8 @@ import pytest
 from pypdf import PdfWriter
 
 from papr.fetchers.browser import native_context
-from papr.fetchers.ucl import _browser_executable, _browser_pdf
+from papr.fetchers.browser_pdf import browser_pdf
+from papr.fetchers.ucl import _browser_executable
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PAPR_RUN_BROWSER_TESTS") != "1",
@@ -49,7 +50,7 @@ def test_native_chrome_saves_original_attachment_bytes(tmp_path):
                 page = context.pages[0] if context.pages else context.new_page()
                 destination = tmp_path / "original.pdf"
                 url = f"http://127.0.0.1:{server.server_port}/original.pdf"
-                assert _browser_pdf(page, url, destination) == url
+                assert browser_pdf(page, url, destination) == url
                 assert destination.read_bytes() == original
     finally:
         server.shutdown()

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import base64
 import logging
 import shutil
 import sys
-import tempfile
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -14,6 +11,7 @@ from ..config import Config
 from ..model import Article
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
+from . import browser_pdf as _browser_pdf_transport
 from .browser import native_context
 from .candidates import rank_candidate_urls as _rank_candidate_urls
 from .diagnostics import PdfAccessError, access_problem
@@ -137,118 +135,6 @@ def _candidate_urls(page) -> list[str]:
     return []
 
 
-def _browser_fetch_pdf(page, url: str, destination: Path) -> str | None:
-    """Use the actual browser network/session after navigation or verification.
-
-    Playwright's request client uses a different network stack; inline Chrome PDF
-    viewers may also make response.body() unavailable. Neither is a missing PDF.
-    """
-    result = page.evaluate("""async url => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 30000);
-        try {
-        const response = await fetch(url, {credentials: 'include', signal: controller.signal});
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (!response.ok || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-')
-            return null;
-        const parts = [];
-        for (let offset = 0; offset < bytes.length; offset += 8192)
-            parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
-        return {url: response.url, data: btoa(parts.join(''))};
-        } finally { clearTimeout(timer); }
-    }""", url)
-    if not isinstance(result, dict) or not isinstance(result.get("data"), str):
-        return None
-    content = base64.b64decode(result["data"], validate=True)
-    if not is_pdf(content):
-        return None
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(content)
-    return result["url"]
-
-
-def _browser_pdf(
-    page, url: str, destination: Path, *, referer: str | None = None,
-    verification_wait: float = 0,
-) -> str | None:
-    from playwright.sync_api import Error as PlaywrightError
-
-    downloads = []
-
-    def capture_download(download):
-        downloads.append(download)
-
-    emit("fetch", "Downloading PDF through UCL browser")
-    page.on("download", capture_download)
-    navigation_error = None
-    try:
-        response = None
-        try:
-            response = page.goto(
-                url, wait_until="domcontentloaded", timeout=30_000, referer=referer or page.url
-            )
-        except PlaywrightError as exc:
-            if not any(message in str(exc) for message in (
-                "net::ERR_ABORTED", "Download is starting",
-            )):
-                raise
-            navigation_error = exc
-        if response and response.ok:
-            try:
-                body = response.body()
-            except PlaywrightError:
-                body = b""  # Native Chrome may already have opened its inline PDF viewer.
-            if is_pdf(body):
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(body)
-                return response.url
-        # Chromium reports ERR_ABORTED when a navigation becomes a download.
-        for _ in range(20):
-            if downloads:
-                break
-            page.wait_for_timeout(250)
-        if not downloads:
-            problem = access_problem(page.url, page.content())
-            if problem and "reCAPTCHA" in problem and verification_wait > 0:
-                emit("fetch", "Complete verification in Chrome; waiting up to 60 seconds")
-                deadline = time.monotonic() + verification_wait
-                while time.monotonic() < deadline and problem and not downloads:
-                    page.wait_for_timeout(1000)
-                    problem = access_problem(page.url, page.content())
-            if problem:
-                raise PdfAccessError(problem)
-        if not downloads:
-            try:
-                source = _browser_fetch_pdf(page, url, destination)
-                if source:
-                    return source
-            except PlaywrightError:
-                logger.debug("In-browser PDF request failed", exc_info=True)
-            problem = access_problem(page.url, page.content())
-            if problem:
-                raise PdfAccessError(problem)
-            if navigation_error is not None:
-                raise navigation_error
-            return None
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=destination.parent, suffix=".browser.pdf", delete=False
-        ) as file:
-            temp = Path(file.name)
-        try:
-            downloads[0].save_as(temp)
-            with temp.open("rb") as file:
-                valid = is_pdf(file.read(5))
-            if not valid:
-                return None
-            temp.replace(destination)
-            return downloads[0].url
-        finally:
-            temp.unlink(missing_ok=True)
-    finally:
-        page.remove_listener("download", capture_download)
-
-
 def fetch(
     article: Article, destination: Path, config: Config, *, headless: bool = True
 ) -> str | None:
@@ -305,7 +191,7 @@ def fetch(
                 except PlaywrightError as exc:
                     logger.debug("UCL PDF request failed (%s)", type(exc).__name__)
                 try:
-                    source = _browser_pdf(
+                    source = _browser_pdf_transport.browser_pdf(
                         page, url, destination, referer=browser_headers["Referer"],
                         verification_wait=0 if headless else 60,
                     )

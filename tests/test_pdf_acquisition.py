@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from papr.config import Config
-from papr.fetchers import oa, ucl
+from papr.fetchers import browser_pdf, oa
 from papr.fetchers.diagnostics import PdfAccessError, access_problem
 from papr.model import Article, article_from_dict
 from papr.resolvers.common import deduplicate
@@ -102,10 +102,10 @@ def test_native_browser_fetch_saves_real_pdf_not_viewer_html(tmp_path):
         "data": base64.b64encode(b"%PDF-1.7\noriginal text layer").decode(),
     }
     path = tmp_path / "original.pdf"
-    assert ucl._browser_fetch_pdf(page, page.evaluate.return_value["url"], path)
+    assert browser_pdf.browser_fetch_pdf(page, page.evaluate.return_value["url"], path)
     assert path.read_bytes() == b"%PDF-1.7\noriginal text layer"
     page.evaluate.return_value = None
-    assert ucl._browser_fetch_pdf(page, "https://publisher.test/verification", path) is None
+    assert browser_pdf.browser_fetch_pdf(page, "https://publisher.test/verification", path) is None
     assert path.read_bytes() == b"%PDF-1.7\noriginal text layer"
 
 
@@ -115,9 +115,9 @@ def test_browser_verification_is_reported_instead_of_missing_pdf(tmp_path, monke
     page.url = "https://publisher.test/article?fr=RR-16"
     page.goto.return_value = None
     page.content.return_value = "verification"
-    monkeypatch.setattr(ucl, "_browser_fetch_pdf", lambda *args: None)
+    monkeypatch.setattr(browser_pdf, "browser_fetch_pdf", lambda *args: None)
     with pytest.raises(PdfAccessError, match="RR-16"):
-        ucl._browser_pdf(page, "https://publisher.test/pdf", tmp_path / "paper.pdf")
+        browser_pdf.browser_pdf(page, "https://publisher.test/pdf", tmp_path / "paper.pdf")
 
 
 def test_visible_browser_allows_user_verification_before_original_fetch(tmp_path, monkeypatch):
@@ -134,7 +134,7 @@ def test_visible_browser_allows_user_verification_before_original_fetch(tmp_path
         path.write_bytes(b"%PDF-1.7\nverified original")
         return url
 
-    monkeypatch.setattr(ucl, "_browser_fetch_pdf", original_fetch)
-    assert ucl._browser_pdf(page, page.url, destination, verification_wait=60) == page.url
+    monkeypatch.setattr(browser_pdf, "browser_fetch_pdf", original_fetch)
+    assert browser_pdf.browser_pdf(page, page.url, destination, verification_wait=60) == page.url
     assert destination.read_bytes() == b"%PDF-1.7\nverified original"
     page.wait_for_timeout.assert_any_call(1000)

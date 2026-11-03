@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from papr.fetchers import ucl
+from papr.fetchers import browser_pdf, ucl
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -98,7 +98,7 @@ def test_browser_pdf_saves_inline_response(tmp_path):
     response.body.return_value = b"%PDF-1.7\ninline"
     response.url = "https://publisher.test/article/pdf"
     destination = tmp_path / "article.pdf"
-    assert ucl._browser_pdf(page, response.url, destination) == response.url
+    assert browser_pdf.browser_pdf(page, response.url, destination) == response.url
     assert destination.read_bytes() == b"%PDF-1.7\ninline"
     page.goto.assert_called_once_with(
         response.url, wait_until="domcontentloaded", timeout=30_000, referer=page.url
@@ -126,7 +126,7 @@ def test_browser_pdf_saves_download_after_aborted_navigation(tmp_path, message):
         handler(download)
 
     page.wait_for_timeout.side_effect = deliver_download
-    assert ucl._browser_pdf(page, download.url, destination) == download.url
+    assert browser_pdf.browser_pdf(page, download.url, destination) == download.url
     assert destination.read_bytes() == b"%PDF-1.7\ndownload"
     assert list(tmp_path.glob("*.browser.pdf")) == []
     page.remove_listener.assert_called_once()
@@ -138,7 +138,9 @@ def test_browser_pdf_aborted_without_download_is_not_success(tmp_path):
     page.content.return_value = ""
     page.goto.side_effect = playwright.Error("net::ERR_ABORTED")
     with pytest.raises(playwright.Error, match="net::ERR_ABORTED"):
-        ucl._browser_pdf(page, "https://publisher.test/article/pdf", tmp_path / "article.pdf")
+        browser_pdf.browser_pdf(
+            page, "https://publisher.test/article/pdf", tmp_path / "article.pdf"
+        )
     assert page.wait_for_timeout.call_count == 20
     page.remove_listener.assert_called_once()
 
@@ -150,7 +152,7 @@ def test_browser_pdf_rejects_invalid_download(tmp_path):
     download.save_as.side_effect = lambda path: path.write_bytes(b"<html>Denied</html>")
     page.wait_for_timeout.side_effect = lambda milliseconds: page.on.call_args.args[1](download)
     destination = tmp_path / "article.pdf"
-    assert ucl._browser_pdf(page, "https://publisher.test/article/pdf", destination) is None
+    assert browser_pdf.browser_pdf(page, "https://publisher.test/article/pdf", destination) is None
     assert not destination.exists()
     assert list(tmp_path.glob("*.browser.pdf")) == []
 
@@ -159,7 +161,9 @@ def test_browser_pdf_propagates_other_navigation_errors(tmp_path):
     page = MagicMock()
     page.goto.side_effect = playwright.Error("net::ERR_CONNECTION_RESET")
     with pytest.raises(playwright.Error, match="net::ERR_CONNECTION_RESET"):
-        ucl._browser_pdf(page, "https://publisher.test/article/pdf", tmp_path / "article.pdf")
+        browser_pdf.browser_pdf(
+            page, "https://publisher.test/article/pdf", tmp_path / "article.pdf"
+        )
     page.wait_for_timeout.assert_not_called()
     page.remove_listener.assert_called_once()
 
@@ -190,7 +194,7 @@ def test_fetch_uses_browser_headers_and_falls_back_after_api_denial(tmp_path, mo
     pdf_url = "https://publisher.test/articles/paper/pdf"
     monkeypatch.setattr(ucl, "_candidate_urls", lambda page: [pdf_url])
     fallback = MagicMock(return_value=pdf_url)
-    monkeypatch.setattr(ucl, "_browser_pdf", fallback)
+    monkeypatch.setattr(browser_pdf, "browser_pdf", fallback)
     destination = tmp_path / "paper.pdf"
     assert (
         ucl.fetch(Article(title="Paper", url=page.url), destination, Config(), headless=False)
@@ -218,7 +222,7 @@ def test_browser_pdf_preserves_original_article_referrer(tmp_path):
     page.goto.return_value.body.return_value = b"%PDF-1.7\nfull"
     page.goto.return_value.url = "https://publisher.test/article/pdf"
     original = "https://publisher.test/article"
-    assert ucl._browser_pdf(
+    assert browser_pdf.browser_pdf(
         page, page.goto.return_value.url, tmp_path / "full.pdf", referer=original
     )
     assert page.goto.call_args.kwargs["referer"] == original
