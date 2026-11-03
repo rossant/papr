@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import base64
 import logging
-import re
 import shutil
 import sys
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import quote, unquote, urljoin, urlsplit
+from urllib.parse import quote, urlsplit
 
 from ..config import Config
 from ..model import Article
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .browser import native_context
+from .candidates import rank_candidate_urls as _rank_candidate_urls
 from .diagnostics import PdfAccessError, access_problem
 from .oa import is_pdf
 
@@ -92,63 +92,6 @@ def _proxy_url(article: Article) -> str:
     if not target:
         raise RuntimeError("UCL fallback needs a DOI or landing-page URL")
     return f"{UCL_LOGIN}?url={quote(target, safe=':/?=&%')}"
-
-
-def _article_identity(url: str) -> tuple[str, str] | None:
-    path = unquote(urlsplit(url).path).lower()
-    pmc = re.search(r"/articles/(?:instance/)?(?:pmc)?(\d+)(?:/|$)", path)
-    if pmc and urlsplit(url).hostname in {
-        "pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
-    }:
-        return "pmc", pmc[1]
-    ovid = re.search(r"/jnls/([^/]+)/(?:abstract|fulltext|pdf)/([^/~]+)", path)
-    if ovid:
-        return "ovid", f"{ovid[1]}/{ovid[2]}"
-    pii = re.search(r"/(?:pii|retrieve/pii)/([a-z0-9]+)", path)
-    if pii:
-        return "pii", pii[1]
-    if "/journals/" in path and "/article" in path:
-        return "journal", re.sub(r"\.(?:xml|html|pdf)$", "", path[path.index("/journals/") :])
-    doi = re.search(r"/(10\.\d{4,9}/.+)", path)
-    if doi:
-        return "doi", re.sub(r"\.(?:pdf|full|abstract)$", "", doi[1])
-    article = re.search(r"/articles?/([^/]+)", path)
-    if article:
-        return "article", re.sub(r"\.(?:html|xml|pdf)$", "", article[1])
-    return None
-
-
-def _rank_candidate_urls(
-    page_url: str, urls: list[str], citation_url: str | None = None
-) -> list[str]:
-    identity = _article_identity(page_url)
-    trusted = urljoin(page_url, citation_url) if citation_url else None
-    accepted: list[str] = []
-    for candidate in ([trusted] if trusted else []) + urls:
-        url = urljoin(page_url, candidate)
-        if urlsplit(url).scheme not in {"http", "https"} or url in accepted:
-            continue
-        candidate_identity = _article_identity(url)
-        if identity and candidate_identity != identity:
-            # Citation metadata can legitimately point to a CDN without an article identifier.
-            if url != trusted or candidate_identity is not None:
-                continue
-        elif not identity and url != trusted:
-            page_path = re.sub(r"\.(?:html|xml|pdf)$", "", urlsplit(page_url).path)
-            candidate_path = re.sub(r"\.(?:html|xml|pdf)$", "", urlsplit(url).path)
-            if candidate_path != page_path and not candidate_path.startswith(page_path + "/"):
-                continue
-        accepted.append(url)
-
-    def priority(url: str) -> int:
-        path = urlsplit(url).path.lower()
-        if "previewpdf" in path:
-            return 100
-        if "downloadpdf" in path or "/pdfft" in path or "/pdf/" in path:
-            return 0
-        return 10 if url == trusted else 20
-
-    return sorted(accepted, key=priority)[:20]
 
 
 def _collect_candidate_urls(page) -> dict:

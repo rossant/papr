@@ -245,3 +245,77 @@ def test_expired_item_deadline_stops_before_network(tmp_path, monkeypatch, confi
         tmp_path / "paper.pdf", config,
     ) is None
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(("landing", "related", "full"), [
+    ("/articles/requested", "/articles/related.pdf", "/articles/requested.pdf"),
+    (
+        "/doi/abs/10.1234/requested",
+        "/doi/pdf/10.1234/related",
+        "/doi/pdf/10.1234/requested",
+    ),
+])
+def test_oa_skips_related_paper_before_original_pdf(
+    tmp_path, monkeypatch, config, landing, related, full,
+):
+    requested = []
+
+    def respond(request):
+        requested.append(request.url.path)
+        if request.url.path == landing:
+            return httpx.Response(200, text=(
+                f'<a href="{related}">Related paper PDF</a><a href="{full}">Article PDF</a>'
+            ), headers={"content-type": "text/html"})
+        return httpx.Response(200, content=b"%PDF-original")
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    destination = tmp_path / "paper.pdf"
+    article = Article("Paper", url=f"https://publisher.test{landing}")
+    assert oa.fetch(article, destination, config) == f"https://publisher.test{full}"
+    assert requested == [landing, full]
+    assert destination.read_bytes() == b"%PDF-original"
+
+
+@pytest.mark.parametrize("meta", [
+    '<meta name="citation_pdf_url" content="https://cdn.test/opaque.pdf?x=1&amp;y=2">',
+    '<meta content="https://cdn.test/opaque.pdf?x=1&amp;y=2" property="citation_pdf_url">',
+])
+def test_oa_uses_citation_cdn_before_other_pdf_links(tmp_path, monkeypatch, config, meta):
+    requested = []
+
+    def respond(request):
+        requested.append(str(request.url))
+        if request.url.host == "publisher.test":
+            return httpx.Response(
+                200, text=f'<a href="unidentified.pdf">Other PDF</a>{meta}',
+                headers={"content-type": "text/html"},
+            )
+        return httpx.Response(200, content=b"%PDF-original")
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    destination = tmp_path / "paper.pdf"
+    landing = "https://publisher.test/articles/requested"
+    assert oa.fetch(Article("Paper", url=landing), destination, config) == (
+        "https://cdn.test/opaque.pdf?x=1&y=2"
+    )
+    assert requested == [landing, "https://cdn.test/opaque.pdf?x=1&y=2"]
+
+
+def test_oa_rejects_supplement_before_original_pdf(tmp_path, monkeypatch, config):
+    requested = []
+
+    def respond(request):
+        requested.append(request.url.path)
+        if request.url.path == "/articles/requested":
+            return httpx.Response(200, text=(
+                '<a href="/articles/requested/paper_MOESM1_ESM.pdf">Supplement</a>'
+                '<a href="/articles/requested/pdf/">Article PDF</a>'
+            ), headers={"content-type": "text/html"})
+        return httpx.Response(200, content=b"%PDF-original")
+
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
+    assert oa.fetch(
+        Article("Paper", url="https://publisher.test/articles/requested"),
+        tmp_path / "paper.pdf", config,
+    ) == "https://publisher.test/articles/requested/pdf/"
+    assert requested == ["/articles/requested", "/articles/requested/pdf/"]

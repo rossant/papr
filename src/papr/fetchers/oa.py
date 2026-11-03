@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import html
 import logging
 import re
 import tempfile
 from collections.abc import Iterator
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -15,15 +15,33 @@ from ..http import client, http_deadline, remaining_time
 from ..model import Article
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
+from .candidates import rank_candidate_urls
 from .diagnostics import access_problem
 
 logger = logging.getLogger(__name__)
 
-PDF_META_RE = re.compile(
-    r'<meta[^>]+(?:name|property)=["\']citation_pdf_url["\'][^>]+content=["\']([^"\']+)',
+PDF_LINK_RE = re.compile(
+    r"\.pdf(?:$|[?#])|/(?:pdf|pdfft|downloadpdf)(?:/|$|[?#])",
     re.I,
 )
-PDF_LINK_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
+
+
+class _PdfLinks(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.citation: str | None = None
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "meta" and self.citation is None:
+            name = attributes.get("name") or attributes.get("property") or ""
+            if name.casefold() == "citation_pdf_url":
+                self.citation = attributes.get("content")
+        if tag == "a":
+            href = attributes.get("href")
+            if href and PDF_LINK_RE.search(href):
+                self.links.append(href)
 
 
 def is_pdf(content: bytes, content_type: str = "") -> bool:
@@ -97,10 +115,12 @@ def _download(url: str, destination: Path | None = None) -> tuple[bytes, str, st
             return None
         if "html" not in ctype.lower() and not text.lstrip().startswith("<"):
             return None
-        candidates = [html.unescape(x) for x in PDF_META_RE.findall(text)]
-        candidates += [html.unescape(x) for x in PDF_LINK_RE.findall(text)]
-        for candidate in candidates[:8]:
-            pdf_url = urljoin(str(r.url), candidate)
+        links = _PdfLinks()
+        links.feed(text)
+        candidates = rank_candidate_urls(
+            str(r.url), links.links, links.citation, allow_generic=True
+        )
+        for pdf_url in candidates[:8]:
             try:
                 emit("fetch", "Following publisher PDF link")
                 pr, pdf_content = _read_response(c, pdf_url, destination)
