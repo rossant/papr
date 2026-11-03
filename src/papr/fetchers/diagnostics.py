@@ -11,6 +11,11 @@ def access_problem(url: str, text: str = "") -> str | None:
     parsed = urlsplit(url)
     params = parse_qs(parsed.query)
     lower = text.casefold()
+    if "<title>client challenge</title>" in lower and "/_fs-ch-" in lower:
+        return (
+            "Publisher requires a JavaScript browser challenge before PDF access. "
+            "Retry with --show-browser to complete verification in normal Chrome."
+        )
     if params.get("c") == ["pdf_country_code_mismatch"] or "pdf_country_code_mismatch" in lower:
         return (
             "PDF server rejected a country mismatch between the institutional proxy and "

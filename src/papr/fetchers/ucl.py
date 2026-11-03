@@ -17,6 +17,8 @@ from . import browser_pdf as _browser_pdf_transport
 from .browser import native_context
 from .candidates import rank_candidate_urls as _rank_candidate_urls
 from .diagnostics import PdfAccessError, access_problem
+from .publishers import publisher_pdf_urls
+from .ucl_session import VERIFY_URL, restore_session, save_session, verified_article
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
 logger = logging.getLogger(__name__)
@@ -41,11 +43,13 @@ def _launch_kwargs() -> dict:
 
 
 @contextmanager
-def _browser_context(playwright, config: Config, headless: bool):
+def _browser_context(playwright, config: Config, headless: bool, *, reuse_session: bool = True):
     if not headless:
         executable = _browser_executable() or playwright.chromium.executable_path
         emit("fetch", "Opening normal Chrome for original PDF retrieval")
         with native_context(playwright, config.ucl_profile_dir, executable) as context:
+            if reuse_session:
+                restore_session(context, config.ucl_profile_dir)
             yield context
     else:
         context = playwright.chromium.launch_persistent_context(
@@ -53,6 +57,8 @@ def _browser_context(playwright, config: Config, headless: bool):
             accept_downloads=True, **_launch_kwargs(),
         )
         try:
+            if reuse_session:
+                restore_session(context, config.ucl_profile_dir)
             yield context
         finally:
             context.close()
@@ -72,15 +78,26 @@ def _playwright():
 def login(config: Config) -> None:
     config.ucl_profile_dir.mkdir(parents=True, exist_ok=True)
     sync_playwright = _playwright()
-    with sync_playwright() as p, _browser_context(p, config, False) as context:
+    with sync_playwright() as p, _browser_context(p, config, False, reuse_session=False) as context:
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(
-            f"{UCL_LOGIN}?url=https://doi.org/10.1038/nature12373",
+            f"{UCL_LOGIN}?url={VERIFY_URL}",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
         print("Complete the UCL SSO/MFA login in the browser.")
-        input("Press Enter here once you are logged in...")
+        while True:
+            input("Press Enter here once you are logged in...")
+            page.goto(
+                f"{UCL_LOGIN}?url={VERIFY_URL}",
+                wait_until="domcontentloaded", timeout=60_000,
+            )
+            if not verified_article(page.url):
+                print("UCL sign-in is not complete. The browser will stay open; finish login/MFA.")
+                continue
+            save_session(context, config.ucl_profile_dir)
+            print("UCL access verified and session saved for future runs.")
+            return
 
 
 def _proxy_url(article: Article) -> str:
@@ -129,7 +146,9 @@ def _candidate_urls(page) -> list[str]:
     emit("fetch", "Discovering publisher PDF links through UCL")
     for attempt in range(11):
         result = _collect_candidate_urls(page)
-        urls = _rank_candidate_urls(page.url, result["links"], result["citation"])
+        urls = _rank_candidate_urls(
+            page.url, [*result["links"], *publisher_pdf_urls(page.url)], result["citation"]
+        )
         if urls or attempt == 10:
             return urls
         page.wait_for_timeout(1_000)

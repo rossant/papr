@@ -19,6 +19,7 @@ from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
 from .diagnostics import access_problem
+from .publishers import publisher_pdf_urls
 from .repositories import repository_urls
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,8 @@ def _download(
         links = _PdfLinks()
         links.feed(text)
         candidates = rank_candidate_urls(
-            str(r.url), links.links, links.citation, allow_generic=True
+            str(r.url), [*links.links, *publisher_pdf_urls(str(r.url))],
+            links.citation, allow_generic=True,
         )
         record_attempt(
             "oa", str(r.url), outcome="discovered" if candidates else "failed",
