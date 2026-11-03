@@ -9,13 +9,13 @@ from urllib.parse import quote, urlsplit
 
 from ..config import Config
 from ..model import Article
+from ..pdf import is_pdf
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from . import browser_pdf as _browser_pdf_transport
 from .browser import native_context
 from .candidates import rank_candidate_urls as _rank_candidate_urls
 from .diagnostics import PdfAccessError, access_problem
-from .oa import is_pdf
 
 UCL_LOGIN = "https://libproxy.ucl.ac.uk/login"
 logger = logging.getLogger(__name__)

@@ -4,13 +4,13 @@ import ipaddress
 import re
 from collections.abc import Iterable
 from copy import copy
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from rapidfuzz.fuzz import ratio, token_set_ratio
 
 from ..config import Config
 from ..model import Article
+from ..pdf import is_local_pdf
 
 DOI_RE = re.compile(
     r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)?(10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
@@ -41,20 +41,6 @@ def local_metadata_config(config: Config) -> Config:
     local_config = copy(config)
     local_config.zotero_api_url = ""
     return local_config
-
-
-def is_local_pdf(value: str | Path | None) -> bool:
-    """Check the same PDF signature used by fetching before skipping online metadata."""
-    if not value:
-        return False
-    path = Path(value).expanduser()
-    try:
-        if not path.is_file():
-            return False
-        with path.open("rb") as stream:
-            return stream.read(5) == b"%PDF-"
-    except OSError:
-        return False
 
 
 def normalize_doi(value: str | None) -> str | None:

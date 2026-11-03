@@ -13,6 +13,7 @@ import httpx
 from ..config import Config
 from ..http import client, http_deadline, remaining_time
 from ..model import Article
+from ..pdf import is_pdf
 from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
@@ -42,11 +43,6 @@ class _PdfLinks(HTMLParser):
             href = attributes.get("href")
             if href and PDF_LINK_RE.search(href):
                 self.links.append(href)
-
-
-def is_pdf(content: bytes, content_type: str = "") -> bool:
-    # Publishers sometimes label error pages as PDFs; require the file signature.
-    return content.startswith(b"%PDF-")
 
 
 def _read_response(

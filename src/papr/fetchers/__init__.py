@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..model import Article
+from ..pdf import is_local_pdf as _is_local_pdf
 from ..progress import emit
 from . import oa, ucl
 
@@ -19,16 +20,6 @@ def _cache_path(article: Article, config: Config) -> Path:
     key = article.doi or article.pmid or article.title
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return config.cache_dir / "pdf" / f"{digest}.pdf"
-
-
-def _is_local_pdf(path: Path) -> bool:
-    if not path.exists() or not path.is_file():
-        return False
-    try:
-        with path.open("rb") as file:
-            return file.read(5) == b"%PDF-"
-    except OSError:
-        return False
 
 
 def fetch_pdf(

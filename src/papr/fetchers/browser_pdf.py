@@ -6,9 +6,9 @@ import tempfile
 import time
 from pathlib import Path
 
+from ..pdf import is_pdf
 from ..progress import emit
 from .diagnostics import PdfAccessError, access_problem
-from .oa import is_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +19,14 @@ def browser_fetch_pdf(page, url: str, destination: Path) -> str | None:
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 30000);
         try {
-        const response = await fetch(url, {credentials: 'include', signal: controller.signal});
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (!response.ok || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-')
-            return null;
-        const parts = [];
-        for (let offset = 0; offset < bytes.length; offset += 8192)
-            parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
-        return {url: response.url, data: btoa(parts.join(''))};
+            const response = await fetch(url, {credentials: 'include', signal: controller.signal});
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (!response.ok || String.fromCharCode(...bytes.slice(0, 5)) !== '%PDF-')
+                return null;
+            const parts = [];
+            for (let offset = 0; offset < bytes.length; offset += 8192)
+                parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
+            return {url: response.url, data: btoa(parts.join(''))};
         } finally { clearTimeout(timer); }
     }""", url)
     if not isinstance(result, dict) or not isinstance(result.get("data"), str):
@@ -51,7 +51,7 @@ def browser_pdf(
     def capture_download(download):
         downloads.append(download)
 
-    emit("fetch", "Downloading PDF through UCL browser")
+    emit("fetch", "Downloading PDF in browser")
     page.on("download", capture_download)
     navigation_error = None
     try:
