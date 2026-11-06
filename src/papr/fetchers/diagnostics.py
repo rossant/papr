@@ -1,7 +1,10 @@
 """Recognize PDF verification failures without exposing signed download URLs."""
 
+import json
 import re
 from urllib.parse import parse_qs, urlsplit
+
+from .candidates import article_identity
 
 
 class PdfAccessError(RuntimeError):
@@ -14,6 +17,26 @@ def access_problem(url: str, text: str = "") -> str | None:
     lower = text.casefold()
     if parsed.hostname in {"login.microsoftonline.com", "login.live.com", "shib-idp.ucl.ac.uk"}:
         return "Institutional sign-in is required before PDF access. Run papr login ucl."
+    if parsed.hostname in {"www.ovid.com", "www-ovid-com.libproxy.ucl.ac.uk"}:
+        identity = article_identity(url)
+        if identity and identity[0] == "ovid":
+            accession = identity[1].split("/", 1)[1]
+            # Ovid embeds current-article flags inside a Next.js JSON string.
+            # Parse data only; a flag on a cited/related article is not evidence.
+            decoded = text.replace(r'\"', '"')
+            for fragment in re.findall(r"\{[^{}]{0,20000}\}", decoded):
+                try:
+                    metadata = json.loads(fragment)
+                except ValueError:
+                    continue
+                if metadata.get("accessionNumber") == accession and (
+                    metadata.get("hasPDF", metadata.get("hasPdf")) is False
+                ):
+                    return (
+                        "Ovid marks the requested article's PDF as unavailable (hasPDF=false). "
+                        "Article HTML access does not establish PDF availability; "
+                        "try another original source or ask the library."
+                    )
     content_error = re.search(r"\b(CPE\d{5})\b", text, re.I)
     if (
         parsed.hostname in {"www.sciencedirect.com", "sciencedirect.com",

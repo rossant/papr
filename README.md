@@ -677,6 +677,9 @@ HTTP 200 error page with code `CPE00001`; papr reports that content error rather
 than claiming the article has no PDF link. `--show-browser` may open the article
 successfully, while its PDF CDN can still reject a proxy/country mismatch. That
 requires a working library PDF-host route or another legitimate original source.
+Ovid may grant article HTML access while explicitly marking the same accession
+`hasPDF=false`; papr reports that PDF-availability flag separately from access
+and link-discovery failures.
 
 NVA (`nva.sikt.no`) repository pages render their downloads with JavaScript.
 Papr uses the public publication/file-link API with JSON content negotiation,

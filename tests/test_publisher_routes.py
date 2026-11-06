@@ -232,3 +232,23 @@ def test_sciencedirect_error_detection_requires_publisher_and_actual_error_page(
     assert access_problem("https://unrelated.test/paper", markup) is None
     url = "https://www.sciencedirect.com/science/article/pii/S123"
     assert access_problem(url, "CPE00001") is None
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_ovid_explicit_no_pdf_flag_is_an_availability_diagnostic(escaped):
+    metadata = ('{"accessionNumber":"00005176-200007001-00004",'
+                '"hasPDF":false,"isEntitled":true}')
+    if escaped:
+        metadata = metadata.replace('"', r'\"')
+    url = ("https://www-ovid-com.libproxy.ucl.ac.uk/jnls/jpgn/fulltext/"
+           "00005176-200007001-00004~euro-growth")
+    problem = access_problem(url, '<script>' + metadata + '</script>')
+    assert "PDF as unavailable" in problem and "hasPDF=false" in problem
+
+
+def test_ovid_related_article_or_nonboolean_flag_cannot_mark_current_pdf_unavailable():
+    url = "https://www.ovid.com/jnls/jpgn/fulltext/00005176-200007001-00004~euro-growth"
+    other = '{"accessionNumber":"00005176-200007001-00005","hasPDF":false}'
+    malformed = '{"accessionNumber":"00005176-200007001-00004","hasPDF":"false"}'
+    assert access_problem(url, other + malformed) is None
+    assert access_problem("https://unrelated.test/", other) is None
