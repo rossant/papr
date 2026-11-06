@@ -7,12 +7,23 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 def canonical_publisher_url(url: str) -> str:
-    """Use the current Springer article route before institutional proxying.
+    """Use HTTPS article routes before institutional proxying.
 
     Legacy HTTP URLs can make EZproxy construct a dotted hostname that Chrome
-    blocks. Only recognized article views on known Springer hosts are rewritten.
+    blocks. Only recognized article views on known publisher hosts are rewritten.
     """
     parsed = urlsplit(url)
+    lww_hosts = {
+        "journals.lww.com": "journals.lww.com",
+        "journals-lww-com.libproxy.ucl.ac.uk": "journals-lww-com.libproxy.ucl.ac.uk",
+        "journals.lww.com.libproxy.ucl.ac.uk": "journals-lww-com.libproxy.ucl.ac.uk",
+    }
+    if (
+        parsed.scheme in {"http", "https"} and parsed.hostname in lww_hosts
+        and parsed.username is None and parsed.password is None
+        and re.fullmatch(r"/\d{8}-\d{9}-\d{5}/?", parsed.path)
+    ):
+        return urlunsplit(("https", lww_hosts[parsed.hostname], parsed.path, "", ""))
     hosts = {
         "link.springer.com": "link.springer.com",
         "link-springer-com.libproxy.ucl.ac.uk": "link-springer-com.libproxy.ucl.ac.uk",

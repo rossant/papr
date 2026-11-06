@@ -179,3 +179,56 @@ def test_springer_client_challenge_is_an_access_failure_not_missing_links(tmp_pa
     assert len(attempts) == 1
     assert attempts[0]["outcome"] == "failed"
     assert "JavaScript browser challenge" in attempts[0]["reason"]
+
+
+@pytest.mark.parametrize("accession", ["00005176-200007001-00004", "00005176-199705000-00001"])
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_lww_accession_uses_https_before_ucl_proxy_redirect(accession, scheme):
+    old = f"{scheme}://journals.lww.com/{accession}"
+    expected = f"https://journals.lww.com/{accession}"
+    assert canonical_publisher_url(old) == expected
+    assert ucl._proxy_url(Article("Paper", url=old)) == f"{ucl.UCL_LOGIN}?url={expected}"
+    dotted = f"http://journals.lww.com.libproxy.ucl.ac.uk/{accession}"
+    assert canonical_publisher_url(dotted) == (
+        f"https://journals-lww-com.libproxy.ucl.ac.uk/{accession}"
+    )
+
+
+@pytest.mark.parametrize("url", [
+    "http://journals.lww.com.evil.test/00005176-200007001-00004",
+    "http://user:secret@journals.lww.com/00005176-200007001-00004",
+    "http://journals.lww.com/search?query=00005176-200007001-00004",
+    "http://journals.lww.com/unidentified",
+])
+def test_lww_canonicalization_does_not_expand_trust_or_guess_article(url):
+    assert canonical_publisher_url(url) == url
+
+
+def test_sciencedirect_http_200_content_error_is_not_missing_links(tmp_path, monkeypatch):
+    markup = (
+        '<title>ScienceDirect</title>'
+        '<h1>There was a problem providing the content you requested</h1>'
+        '<p>Reference number: private-reference</p><p>IP Address: private-address</p>'
+        '<p>CPE00001</p>'
+    )
+    url = "https://www-sciencedirect-com.libproxy.ucl.ac.uk/science/article/pii/S0022347688806346"
+    problem = access_problem(url, markup)
+    assert "CPE00001" in problem and "--show-browser" in problem
+    assert "private-reference" not in problem and "private-address" not in problem
+    monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"content-type": "text/html"}, text=markup)
+    )))
+    attempts = []
+    with capture_attempts(attempts):
+        assert oa._download(url, tmp_path / "paper.pdf") is None
+    assert len(attempts) == 1
+    assert "CPE00001" in attempts[0]["reason"]
+    assert "No matching PDF" not in attempts[0]["reason"]
+    assert not (tmp_path / "paper.pdf").exists()
+
+
+def test_sciencedirect_error_detection_requires_publisher_and_actual_error_page():
+    markup = 'There was a problem providing the content you requested CPE00001'
+    assert access_problem("https://unrelated.test/paper", markup) is None
+    url = "https://www.sciencedirect.com/science/article/pii/S123"
+    assert access_problem(url, "CPE00001") is None

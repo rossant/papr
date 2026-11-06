@@ -14,6 +14,18 @@ def access_problem(url: str, text: str = "") -> str | None:
     lower = text.casefold()
     if parsed.hostname in {"login.microsoftonline.com", "login.live.com", "shib-idp.ucl.ac.uk"}:
         return "Institutional sign-in is required before PDF access. Run papr login ucl."
+    content_error = re.search(r"\b(CPE\d{5})\b", text, re.I)
+    if (
+        parsed.hostname in {"www.sciencedirect.com", "sciencedirect.com",
+                            "www-sciencedirect-com.libproxy.ucl.ac.uk"}
+        and "there was a problem providing the content you requested" in lower
+        and content_error
+    ):
+        return (
+            f"ScienceDirect returned a content error ({content_error[1].upper()}) "
+            "instead of the article. Retry with --show-browser; if it persists, "
+            "contact the library or publisher with the error code."
+        )
     challenge_title = re.search(
         r"<title>\s*(?:just a moment|un instant)[\s.!…]*</title>", lower
     )
@@ -69,6 +81,8 @@ def response_problem(
 def recovery_for(problem: str) -> str:
     if "sign-in is required" in problem:
         return "Run papr login ucl and complete institutional sign-in"
+    if "ScienceDirect returned a content error" in problem:
+        return "Retry with --show-browser; if it persists, contact the library or publisher"
     if "country mismatch" in problem:
         return "Try a repository copy or ask the library to check PDF-host proxy routing"
     if "HTML viewer" in problem:
