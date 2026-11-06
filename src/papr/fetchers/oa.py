@@ -20,7 +20,7 @@ from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
 from .diagnostics import access_problem, recovery_for, response_problem
 from .publishers import publisher_pdf_urls
-from .repositories import repository_urls
+from .repositories import nva_pdf_urls, repository_urls
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +130,12 @@ def _download(
             return None
         links = _PdfLinks()
         links.feed(text)
-        candidates = rank_candidate_urls(
-            str(r.url), [*links.links, *publisher_pdf_urls(str(r.url))],
-            links.citation, allow_generic=True,
-        )
+        candidates = nva_pdf_urls(c, str(r.url), article)
+        if not candidates:
+            candidates = rank_candidate_urls(
+                str(r.url), [*links.links, *publisher_pdf_urls(str(r.url))],
+                links.citation, allow_generic=True,
+            )
         record_attempt(
             "oa", str(r.url), outcome="discovered" if candidates else "failed",
             reason="Publisher PDF links found" if candidates else "No matching PDF links found",

@@ -671,6 +671,19 @@ including time in the bounded queue; resolve/fetch timings record the actual
 work, including shared acquisition for duplicates. Papers overlap, so adding
 their timings does not give batch elapsed time.
 
+For UCL access, legacy LWW accession URLs are upgraded to HTTPS before proxying;
+this avoids Chrome blocking dotted EZproxy hostnames. ScienceDirect can return an
+HTTP 200 error page with code `CPE00001`; papr reports that content error rather
+than claiming the article has no PDF link. `--show-browser` may open the article
+successfully, while its PDF CDN can still reject a proxy/country mismatch. That
+requires a working library PDF-host route or another legitimate original source.
+
+NVA (`nva.sikt.no`) repository pages render their downloads with JavaScript.
+Papr uses the public publication/file-link API with JSON content negotiation,
+checks the exact requested DOI, and follows only openly downloadable published
+PDFs. Embargoed, hidden, accepted/submitted, and supplementary files are excluded.
+Signed file-link query parameters remain absent from acquisition diagnostics.
+
 The process exits non-zero if at least one item fails.
 Unreadable or malformed input files and corrupt PDFs are recorded in the report;
 other inputs continue processing. Local SQLite libraries are read once per
