@@ -19,6 +19,7 @@ from ..progress import emit
 from ..resolvers.common import normalize_pmcid
 from .candidates import rank_candidate_urls
 from .diagnostics import access_problem, recovery_for, response_problem
+from .pmc import pdf_urls as pmc_pdf_urls
 from .publishers import publisher_pdf_urls
 from .repositories import nva_pdf_urls, repository_urls
 
@@ -210,13 +211,24 @@ def _unpaywall_urls(article: Article, config: Config) -> list[str]:
 
 
 def candidate_urls(article: Article, config: Config) -> Iterator[str]:
-    """Yield known direct sources before performing a lazy discovery request."""
+    """Prefer PMC's machine-download service, then known and lazily discovered sources."""
     seen: set[str] = set()
+    pmcid = normalize_pmcid(article.pmcid)
+    if pmcid:
+        try:
+            with client() as c:
+                cloud_urls = pmc_pdf_urls(c, pmcid, article)
+            for url in cloud_urls:
+                seen.add(url)
+                yield url
+        except Exception:
+            record_attempt("pmc_cloud", reason="PMC dataset discovery failed",
+                           recovery="Try another original PDF source")
+            logger.debug("PMC dataset discovery failed", exc_info=True)
     direct = []
     if article.oa_pdf_url:
         direct.append(article.oa_pdf_url)
     direct.extend(article.oa_pdf_urls)
-    pmcid = normalize_pmcid(article.pmcid)
     if pmcid:
         direct.append(f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/pdf/")
     for url in direct:

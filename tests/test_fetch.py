@@ -35,7 +35,8 @@ def test_pmc_identifiers_and_urls_fetch_canonical_pdf(tmp_path, monkeypatch, con
 
     monkeypatch.setattr(oa, "client", lambda: httpx.Client(transport=httpx.MockTransport(respond)))
     assert oa.fetch(Article("Paper", pmcid=pmcid), tmp_path / "paper.pdf", config)
-    assert requested == ["https://pmc.ncbi.nlm.nih.gov/articles/PMC4166833/pdf/"]
+    assert requested[0].startswith("https://pmc-oa-opendata.s3.amazonaws.com/?")
+    assert requested[1:] == ["https://pmc.ncbi.nlm.nih.gov/articles/PMC4166833/pdf/"]
 
 
 def test_invalid_pmc_identifier_does_not_create_broken_url(config):

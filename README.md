@@ -788,6 +788,14 @@ clear evidence of a different DOI or article title, the candidate is rejected.
 Scans and documents lacking extractable identifiers remain eligible; these checks
 cannot establish bibliographic identity when the evidence is absent.
 
+For articles with a PMCID, papr first checks PMC's public AWS dataset over HTTPS.
+It reads the available versions' metadata and selects only matching published
+PDFs, rather than assuming that version 1 exists or that the highest version is
+the published article. This uses the anonymous machine-download service that
+replaced PMC's legacy OA package API in August 2026, avoiding browser verification
+on PMC's website. Known publisher and repository sources remain fallbacks.
+See [PMC's dataset documentation](https://pmc.ncbi.nlm.nih.gov/tools/pmcaws/).
+
 The opt-in native Chrome attachment regression uses a local HTTP server and a
 disposable browser profile (a desktop display and Chrome/Chromium are required):
 
