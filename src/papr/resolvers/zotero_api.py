@@ -99,8 +99,15 @@ def articles(query: str, config: Config, qmode: str) -> list[Article]:
             },
         )
         if r.status_code in {403, 404}:
-            reason = "disabled in Zotero" if r.status_code == 403 else "unavailable"
-            emit("resolve", f"Zotero desktop API {reason}; trying local database")
+            if r.status_code == 403:
+                emit(
+                    "resolve",
+                    "Zotero API access denied (403); enable Settings → Advanced → "
+                    "Allow other applications on this computer to communicate with Zotero "
+                    "for the local desktop API",
+                )
+            else:
+                emit("resolve", "Zotero desktop API unavailable (404)")
             return []
         r.raise_for_status()
         candidates = []

@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from papr.config import Config
+from papr.progress import EventBuffer
 from papr.resolvers import zolit, zolit_sbs, zotero, zotero_api, zotero_sqlite
 from papr.resolvers.session import resolution_session
 
@@ -317,6 +318,47 @@ def test_zotero_locked_snapshot_stops_retrying(tmp_path, monkeypatch):
     conn = zotero_sqlite.snapshot(path)
     assert conn.execute("select count(*) from items").fetchone()[0] == 2
     conn.close()
+
+
+@pytest.mark.parametrize("api_enabled", [False, True])
+def test_locked_zotero_uses_api_or_explains_required_setting(tmp_path, monkeypatch, api_enabled):
+    path = tmp_path / "zotero.sqlite"
+    _make_zotero_db(path)
+    pdf = tmp_path / "attached.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr(zotero_sqlite, "SNAPSHOT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(zotero_sqlite, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.01)
+
+    def get(self, url, **kwargs):
+        request = httpx.Request("GET", url)
+        if not api_enabled:
+            return httpx.Response(403, request=request)
+        if url.endswith("/top"):
+            data = [{"key": "NEW", "data": {"title": "New paper", "DOI": "10.1000/new"}}]
+            return httpx.Response(200, json=data, request=request)
+        if url.endswith("/children"):
+            data = [{"key": "PDF", "data": {"itemType": "attachment", "filename": "new.pdf"}}]
+            return httpx.Response(200, json=data, request=request)
+        return httpx.Response(200, text=pdf.as_uri(), request=request)
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    writer = sqlite3.connect(path)
+    writer.execute("begin exclusive")
+    events = EventBuffer()
+    try:
+        with resolution_session(), events.capture():
+            result = zotero.by_doi("10.1000/new", Config(zotero_data_dir=tmp_path))
+    finally:
+        writer.rollback()
+        writer.close()
+    details = "\n".join(detail for _, detail, _ in events.events)
+    assert "Zotero database unavailable" in details
+    if api_enabled:
+        assert result is not None and result.local_pdf == str(pdf)
+    else:
+        assert result is None
+        assert "Allow other applications on this computer to communicate with Zotero" in details
+        assert "trying local database" not in details
 
 
 def test_zotero_api_only_loads_attachments_for_ranked_candidates(monkeypatch):

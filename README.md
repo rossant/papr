@@ -163,6 +163,14 @@ after about one second and continues to other sources. Failed snapshots are
 remembered for the rest of that command so batch items do not repeat the wait.
 Enable the local API setting above to let papr search Zotero while it is open.
 
+If the database is locked **and** the local API is disabled, papr cannot read new
+items, even when their PDF files already exist in Zotero's storage directory.
+A previously imported Zolit index may still find older items but will not know
+about new additions until it is refreshed separately. Enable the local API
+setting to resolve new items while Zotero stays open; papr does not change that
+setting, force a Zolit sync, or bypass SQLite locks. An institutional PDF already
+attached in Zotero needs no new publisher login once its item is accessible.
+
 ## Zolit integration
 
 `papr` understands the actual Zolit schema used by `rossant/zolit`:
